@@ -214,7 +214,7 @@ async def chat_completions(request: ChatCompletionRequest):
         }
     }
 
-app.include_router(router, prefix="/rights_protection")
+app.include_router(router, prefix="/agent-ai-weiquan")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("API_PORT", 7777)), workers=1)
