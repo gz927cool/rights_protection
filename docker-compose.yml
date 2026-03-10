@@ -1,14 +1,14 @@
-name: legal-assistant-project
+name: ai-weiquan
 
 services:
   legal-assistant:
     build: .
-    image: legal-assistant:v0.1.0
+    image: ai-weiquan:v0.1.0
     platform: linux/amd64
     ports:
-      - "8501:8501"
+      - "7777:7777"
     environment:
-      - OPENAI_API_KEY=sk-71FSn965RKqZp04B610f53069aBe4fB7Bc3799Bf60F0B99e
-      - OPENAI_API_BASE=http://oneapi-dev.skytech.io/v1
-      - OPENAI_MODEL_NAME=gpt-4o
+      - OPENAI_API_KEY=sk-7qiEVTkcmI2Lq5O8hVEXgtdiuBzwZvFcYLszs3UKcfVdGU75
+      - BASE_URL=http://192.168.0.151:3001/v1
+      - MODEL_NAME=kj-qwen3-max
     restart: unless-stopped

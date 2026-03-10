@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    k8s.kuboard.cn/layer: svc
+    k8s.kuboard.cn/name: $HARBOR_IMAGE_NAME
+  name: $HARBOR_IMAGE_NAME
+  namespace: $KUBE_PROJECT_NAME
+spec:
+  selector:
+    matchLabels:
+      k8s.kuboard.cn/layer: svc
+      k8s.kuboard.cn/name: $HARBOR_IMAGE_NAME
+  template:
+    metadata:
+      labels:
+        k8s.kuboard.cn/layer: svc
+        k8s.kuboard.cn/name: $HARBOR_IMAGE_NAME
+    spec:
+      containers:
+        - image: zy.io/$HARBOR_IMAGE_NAMESPACE/$HARBOR_IMAGE_NAME:$GIT_BRANCH_NAME-$BUILD_ID
+          name: $HARBOR_IMAGE_NAME
+          ports:
+            - containerPort: 7777
