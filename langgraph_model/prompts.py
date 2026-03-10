@@ -71,13 +71,13 @@ ANSWERER_PROMPT = """
   - 不要一次性输出所有情形（由 detailer 模块负责）
 """
 
-with open(os.path.join(DATAPATH,'法律咨询解答示例.jsonl'), 'r', encoding='utf-8') as file:
-    data_list = []
-    for line in file:
-        data = json.loads(line)
-        data_list.append(data)
-    EXAMPLE_PROMPT = """##样例:\n""" +'\n'.join([f"### 问题:\n{data['input']}\n### 解答:\n{data['output']}" for data in data_list])
-ANSWERER_PROMPT = ANSWERER_PROMPT + EXAMPLE_PROMPT
+# with open(os.path.join(DATAPATH,'法律咨询解答示例.jsonl'), 'r', encoding='utf-8') as file:
+#     data_list = []
+#     for line in file:
+#         data = json.loads(line)
+#         data_list.append(data)
+#     EXAMPLE_PROMPT = """##样例:\n""" +'\n'.join([f"### 问题:\n{data['input']}\n### 解答:\n{data['output']}" for data in data_list])
+# ANSWERER_PROMPT = ANSWERER_PROMPT + EXAMPLE_PROMPT
 
 
 
