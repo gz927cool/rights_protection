@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "agent": "langgraph_model/legal_supervisor.py:supervisor_agent"
+  },
+  "env": ".env"
+}

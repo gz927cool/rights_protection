@@ -1,0 +1,16 @@
+[project]
+name = "legal-assistant-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.135.1",
+    "json-repair>=0.58.4",
+    "langchain>=1.2.10",
+    "langchain-openai>=1.1.10",
+    "pandas>=3.0.1",
+    "python-dotenv>=1.2.2",
+    "tabulate>=0.10.0",
+    "uvicorn>=0.41.0",
+]

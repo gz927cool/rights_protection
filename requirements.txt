@@ -1,0 +1,12 @@
+langchain_core
+langgraph
+langchain
+langchain-openai
+pydantic
+python-dotenv
+pandas
+tabulate
+openpyxl
+fastapi
+uvicorn
+json_repair

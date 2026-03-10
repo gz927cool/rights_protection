@@ -1,0 +1,11 @@
+*.pyc
+/test/*
+.env
+.idea/*
+data/*
+.vscode/launch.json
+data/bak.txt
+.langgraph_api/
+frontend-master
+.env
+.env
