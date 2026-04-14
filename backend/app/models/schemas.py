@@ -140,3 +140,12 @@ class DocumentGenRequest(BaseModel):
 class DocumentGenResponse(BaseModel):
     document_id: UUID
     content: str
+
+
+class ContextualAnalysisRequest(BaseModel):
+    case_id: UUID
+    current_step: int = Field(..., ge=1, le=9)
+    context_data: dict = Field(
+        ...,
+        description="包含 case_summary、answers_this_step、previous_steps_summary、evidence_status、user_question"
+    )

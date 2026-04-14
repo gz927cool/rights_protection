@@ -62,7 +62,17 @@ export const ai = {
   generateDocument: (caseId: string, documentType: string) =>
     client.post('/ai/generate-document', { case_id: caseId, document_type: documentType }),
   review: (caseData: object, question?: string) =>
-    client.post('/ai/review', { case_data: caseData, user_question: question })
+    client.post('/ai/review', { case_data: caseData, user_question: question }),
+  contextualAnalysis: (params: {
+    caseId: string
+    currentStep: number
+    contextData: Record<string, unknown>
+  }) =>
+    client.post('/ai/contextual-analysis', {
+      case_id: params.caseId,
+      current_step: params.currentStep,
+      context_data: params.contextData
+    })
 }
 
 export const api = { auth, cases, causes, evidence, documents, ai }
