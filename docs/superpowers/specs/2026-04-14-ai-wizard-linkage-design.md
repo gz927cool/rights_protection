@@ -69,8 +69,8 @@
 AIContextBridge 收集上下文：
   - currentStep（当前步骤）
   - stepData[currentStep]（当前步骤填写的数据）
-  - 前置步骤摘要（caseSummary）
-  - 证据列表（evidenceStatus）
+  - 前置步骤摘要（previousStepsSummary，对应 evidence_status 等）
+  - 证据状态（evidenceStatus，对应 has_labor_contract 等布尔标志）
   - 已判定的案由（causeCodes）
        │
        ▼
@@ -117,7 +117,9 @@ interface AISuggestion {
 
 ## 四、AI 对话上下文结构
 
-### 4.1 请求格式
+### 4.1 请求格式（context_data 内容）
+
+`POST /api/ai/contextual-analysis` 请求体中的 `context_data` 字段结构如下：
 
 ```json
 {
@@ -183,11 +185,15 @@ interface AISuggestion {
 POST /api/ai/contextual-analysis
 ```
 
+**请求体：**
+
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | case_id | UUID | 案件 ID |
 | current_step | int | 当前步骤 1-9 |
-| context_data | object | 包含 case_summary、answers、evidence_status 等 |
+| context_data | object | 包含 case_summary、answers_this_step、previous_steps_summary、evidence_status 等，详见 4.1 |
+
+> **注意：** Section 4.1 中的 JSON 示例展示的是 `context_data` 的内部结构，而非最外层请求体。实际请求需将 4.1 中的字段包装在 `context_data` 对象内。
 
 ### 5.2 响应字段
 
