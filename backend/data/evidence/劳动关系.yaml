@@ -1,0 +1,12 @@
+name: 劳动关系证据
+purpose: 证明劳动者与用人单位存在劳动关系
+items:
+  - name: 劳动合同
+    description: 证明劳动关系存在
+    how_to_collect: 向公司HR申请复印，加盖公司公章
+  - name: 社保缴费记录
+    description: 证明劳动关系及时间
+    how_to_collect: 登录当地社保APP导出
+  - name: 工资流水
+    description: 证明工资标准和发放情况
+    how_to_collect: 手机银行APP导出带公司名的流水

@@ -1,0 +1,23 @@
+name: 欠薪
+code: QS-001
+level: 1
+common_questions:
+  - id: q1
+    text: 您遇到的欠薪情况属于哪种？
+    type: choice
+    options:
+      - 未支付工资
+      - 拖欠加班费
+      - 拖欠奖金
+      - 拖欠经济补偿金
+  - id: q2
+    text: 入职时间？
+    type: date
+special_questions:
+  - id: sq1
+    text: 工资支付周期是？
+    type: choice
+    options:
+      - 月薪
+      - 日薪
+      - 计件
