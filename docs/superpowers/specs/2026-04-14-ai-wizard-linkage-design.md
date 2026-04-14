@@ -117,35 +117,36 @@ interface AISuggestion {
 
 ## 四、AI 对话上下文结构
 
-### 4.1 请求格式（context_data 内容）
+### 4.1 context_data 字段说明
 
-`POST /api/ai/contextual-analysis` 请求体中的 `context_data` 字段结构如下：
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| case_summary | string | 案件事实摘要，基于前置步骤的答案生成 |
+| answers_this_step | object | 当前步骤用户填写的问答对，key 为 question_id |
+| previous_steps_summary | object | 前置步骤的摘要，key 为步骤编号 |
+| evidence_status | object | 证据状态，包含 total（总数）及各类型布尔标志 |
+| user_question | string \| null | 用户主动提问的内容，无提问时为 null |
 
-```json
-{
-  "case_id": "uuid-string",
-  "current_step": 3,
-  "step_label": "信息补全",
-  "case_summary": "用户反映公司拖欠2024年1-3月工资，月薪8000元，已工作2年，因公司经营困难被口头辞退。",
-  "answers_this_step": {
-    "q1": "拖欠工资",
-    "q2": "2022年3月1日入职",
-    "q3": "8000元/月",
-    "q4": "2024年3月15日被辞退"
-  },
-  "previous_steps_summary": {
-    "step1": { "mode": "AI问答", "selected_cause": "欠薪" },
-    "step2": { "cause_type": "未支付工资", "amount_claimed": null }
-  },
-  "evidence_status": {
+**字段详情：**
+
+- `evidence_status` 结构固定为：
+  ```json
+  {
     "total": 2,
     "has_labor_contract": true,
     "has_salary_record": false,
     "has_termination_proof": false
-  },
-  "user_question": null
-}
-```
+  }
+  ```
+  各布尔标志表示该类证据是否已上传/可补充。
+
+- `previous_steps_summary` 结构示例：
+  ```json
+  {
+    "step1": { "mode": "AI问答", "selected_cause": "欠薪" },
+    "step2": { "cause_type": "未支付工资", "amount_claimed": null }
+  }
+  ```
 
 ### 4.2 响应格式
 
@@ -189,11 +190,39 @@ POST /api/ai/contextual-analysis
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| case_id | UUID | 案件 ID |
-| current_step | int | 当前步骤 1-9 |
-| context_data | object | 包含 case_summary、answers_this_step、previous_steps_summary、evidence_status 等，详见 4.1 |
+| case_id | UUID | 案件 ID（顶层字段） |
+| current_step | int | 当前步骤 1-9（顶层字段） |
+| context_data | object | 案件上下文，包含以下字段，详见下方示例 |
 
-> **注意：** Section 4.1 中的 JSON 示例展示的是 `context_data` 的内部结构，而非最外层请求体。实际请求需将 4.1 中的字段包装在 `context_data` 对象内。
+**context_data 结构示例：**
+
+```json
+{
+  "case_id": "uuid-string",
+  "current_step": 3,
+  "step_label": "信息补全",
+  "case_summary": "用户反映公司拖欠2024年1-3月工资，月薪8000元，已工作2年，因公司经营困难被口头辞退。",
+  "answers_this_step": {
+    "q1": "拖欠工资",
+    "q2": "2022年3月1日入职",
+    "q3": "8000元/月",
+    "q4": "2024年3月15日被辞退"
+  },
+  "previous_steps_summary": {
+    "step1": { "mode": "AI问答", "selected_cause": "欠薪" },
+    "step2": { "cause_type": "未支付工资", "amount_claimed": null }
+  },
+  "evidence_status": {
+    "total": 2,
+    "has_labor_contract": true,
+    "has_salary_record": false,
+    "has_termination_proof": false
+  },
+  "user_question": null
+}
+```
+
+> **结构说明：** `case_id` 和 `current_step` 为顶层字段，其余上下文信息均在 `context_data` 对象内。API 收到请求后，将顶层字段与 `context_data` 合并后一同处理。
 
 ### 5.2 响应字段
 
