@@ -18,22 +18,21 @@ frontend/src/
 │   ├── caseStore.ts          # 改造：新增 stepData、caseSummary、aiMessages 字段
 │   └── aiContextStore.ts    # 新增：AI 上下文状态（Zustand）
 ├── hooks/
-│   ├── useAIContext.ts       # 新增：上下文同步 Hook
-│   └── useAISuggestion.ts    # 新增：建议确认/忽略 Hook
+│   ├── useAIContext.ts       # 新增：上下文同步 Hook（含 buildContextData）
+│   └── useAISuggestion.ts   # 新增：建议确认/忽略 Hook
 ├── components/
 │   ├── layout/
 │   │   ├── AppShell.tsx     # 新增：左右分栏布局容器
-│   │   ├── StepWizard.tsx    # 现有：无需改动
-│   │   └── StepContent.tsx  # 改造：步骤完成时触发 AI 分析
+│   │   ├── StepWizard.tsx   # 现有：无需改动
+│   │   └── StepContent.tsx  # 改造：StepContent 保持现有逻辑，数据保存由各表单组件负责
 │   ├── ai/
-│   │   ├── AIChatPanel.tsx  # 改造：渲染建议卡片 + 对话历史
-│   │   ├── AISuggestionCard.tsx  # 新增：建议卡片组件
-│   │   └── AIContextBridge.tsx   # 新增：上下文桥接组件
+│   │   ├── AIChatPanel.tsx  # 改造：渲染建议卡片 + 对话历史 + 用户主动聊天
+│   │   └── AISuggestionCard.tsx  # 新增：建议卡片组件
 │   └── business/
-│       └── ...              # 现有组件无需改动
+│       └── ...              # 现有组件：需在数据填写时调用 setStepData 保存数据
 ├── pages/
 │   ├── Home.tsx             # 现有：无需改动
-│   └── CaseWizard.tsx       # 改造：集成 AIContextBridge
+│   └── CaseWizard.tsx       # 改造：步骤完成时触发 AI 分析
 ├── services/
 │   ├── api.ts               # 改造：新增 contextualAnalysis API
 │   └── aiService.ts         # 改造：新增 contextualAnalysis 方法
@@ -48,6 +47,8 @@ backend/app/
 └── services/
     └── document_service.py  # 现有：无需改动
 ```
+
+> **AIContextBridge 说明**: 规格文档中的 `AIContextBridge` 组件在实现中被 `useAIContext` Hook 替代，逻辑职责相同（订阅向导状态、组装上下文、触发分析），代码更简洁。不需要单独创建 `AIContextBridge.tsx` 文件。
 
 ---
 
@@ -148,7 +149,6 @@ export const useCaseStore = create<CaseState>((set) => ({
       const suggestion = state.pendingSuggestions.find((s) => s.id === suggestionId)
       if (!suggestion) return state
 
-      // 将建议值写入当前步骤的 stepData
       const currentStepData = state.stepData[state.currentStep] || {}
       const updatedStepData = {
         ...state.stepData,
@@ -176,7 +176,7 @@ export const useCaseStore = create<CaseState>((set) => ({
 - [ ] **Step 2: 验证 TypeScript 编译**
 
 Run: `cd frontend && npx tsc --noEmit 2>&1 | head -30`
-Expected: 无 error（仅有现有警告可忽略）
+Expected: 无 error
 
 - [ ] **Step 3: 提交**
 
@@ -202,14 +202,10 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 import { create } from 'zustand'
 
 export interface AIContextState {
-  // 当前是否正在等待 AI 分析
   isAnalyzing: boolean
-  // 最后分析时间戳
   lastAnalyzedAt: number | null
-  // 当前分析中的步骤
   analyzingStep: number | null
 
-  // 同步状态
   setAnalyzing: (step: number) => void
   setAnalyzed: () => void
   reset: () => void
@@ -220,14 +216,12 @@ export const useAIContextStore = create<AIContextState>((set) => ({
   lastAnalyzedAt: null,
   analyzingStep: null,
 
-  setAnalyzing: (step) =>
-    set({ isAnalyzing: true, analyzingStep: step }),
+  setAnalyzing: (step) => set({ isAnalyzing: true, analyzingStep: step }),
 
   setAnalyzed: () =>
     set({ isAnalyzing: false, analyzingStep: null, lastAnalyzedAt: Date.now() }),
 
-  reset: () =>
-    set({ isAnalyzing: false, lastAnalyzedAt: null, analyzingStep: null })
+  reset: () => set({ isAnalyzing: false, lastAnalyzedAt: null, analyzingStep: null })
 }))
 ```
 
@@ -282,34 +276,54 @@ export function useAIContext() {
   const { setAnalyzing, setAnalyzed } = useAIContextStore()
 
   /**
+   * 构建发送给 AI 的上下文数据
+   */
+  const buildContextData = useCallback(() => {
+    const answersThisStep = (stepData[currentStep] || {}) as Record<string, unknown>
+
+    // 构建前置步骤摘要：遍历所有已完成步骤
+    const previousStepsSummary: Record<string, Record<string, unknown>> = {}
+    for (let s = 1; s < currentStep; s++) {
+      const sData = stepData[s]
+      if (sData && Object.keys(sData).length > 0) {
+        previousStepsSummary[`step${s}`] = sData
+      }
+    }
+
+    return {
+      step_label: STEP_LABELS[currentStep - 1],
+      case_summary: caseSummary,
+      answers_this_step: answersThisStep,
+      previous_steps_summary: previousStepsSummary,
+      // evidence_status 由后端在 contextual-analysis 端点中补充
+      user_question: null
+    }
+  }, [currentStep, stepData, caseSummary])
+
+  /**
    * 触发 AI 上下文分析
    * 在步骤完成时调用（点击"下一步"时）
    */
   const analyzeCurrentStep = useCallback(async () => {
     if (!caseId || pendingSuggestions.length > 0) {
-      // 有未处理的建议时，不触发新分析
       return
     }
 
     setAnalyzing(currentStep)
 
     try {
-      // 构建上下文数据
       const contextData = buildContextData()
 
-      // 调用 AI 分析
       const result = await aiService.contextualAnalysis({
         caseId,
         currentStep,
         contextData
       })
 
-      // 更新案件摘要
       if (result.case_summary) {
         setCaseSummary(result.case_summary)
       }
 
-      // 添加 AI 对话消息
       addAIMessage({
         id: `msg_${Date.now()}`,
         role: 'assistant',
@@ -318,7 +332,6 @@ export function useAIContext() {
         timestamp: Date.now()
       })
 
-      // 设置待确认的建议
       if (result.suggestions && result.suggestions.length > 0) {
         setPendingSuggestions(result.suggestions)
       }
@@ -333,37 +346,7 @@ export function useAIContext() {
     } finally {
       setAnalyzed()
     }
-  }, [caseId, currentStep, stepData, caseSummary, pendingSuggestions.length])
-
-  /**
-   * 构建发送给 AI 的上下文数据
-   */
-  const buildContextData = useCallback(() => {
-    const answersThisStep = (stepData[currentStep] || {}) as Record<string, unknown>
-
-    // 构建前置步骤摘要
-    const previousStepsSummary: Record<string, Record<string, unknown>> = {}
-    for (let s = 1; s < currentStep; s++) {
-      const sData = stepData[s]
-      if (sData && Object.keys(sData).length > 0) {
-        if (s === 1) {
-          previousStepsSummary['step1'] = sData
-        } else if (s === 2) {
-          previousStepsSummary['step2'] = sData
-        }
-        // 依此类推...
-      }
-    }
-
-    return {
-      step_label: STEP_LABELS[currentStep - 1],
-      case_summary: caseSummary,
-      answers_this_step: answersThisStep,
-      previous_steps_summary: previousStepsSummary,
-      // evidence_status 和 user_question 在后续 Task 补充
-      user_question: null
-    }
-  }, [currentStep, stepData, caseSummary])
+  }, [caseId, currentStep, buildContextData, pendingSuggestions.length])
 
   return {
     analyzeCurrentStep,
@@ -375,7 +358,7 @@ export function useAIContext() {
 - [ ] **Step 2: 验证编译**
 
 Run: `cd frontend && npx tsc --noEmit 2>&1 | head -20`
-Expected: 无新增 error（aiService.contextualAnalysis 尚不存在，但类型检查会通过）
+Expected: 无新增 error
 
 - [ ] **Step 3: 提交**
 
@@ -399,7 +382,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 // frontend/src/hooks/useAISuggestion.ts
 
 import { useCallback } from 'react'
-import { useCaseStore, AISuggestion } from '../stores/caseStore'
+import { useCaseStore } from '../stores/caseStore'
 
 export function useAISuggestion() {
   const {
@@ -410,31 +393,19 @@ export function useAISuggestion() {
     currentStep
   } = useCaseStore()
 
-  /**
-   * 确认建议：将建议值写入 stepData
-   */
   const accept = useCallback((suggestionId: string) => {
     acceptSuggestion(suggestionId)
   }, [acceptSuggestion])
 
-  /**
-   * 忽略建议：从待处理列表中移除
-   */
   const dismiss = useCallback((suggestionId: string) => {
     dismissSuggestion(suggestionId)
   }, [dismissSuggestion])
 
-  /**
-   * 获取当前步骤的预填值（用于高亮显示）
-   */
   const getPrefilledValue = useCallback((field: string): unknown => {
     const currentStepData = stepData[currentStep] || {}
     return currentStepData[field]
   }, [stepData, currentStep])
 
-  /**
-   * 检查字段是否有预填值
-   */
   const hasPrefilledValue = useCallback((field: string): boolean => {
     return getPrefilledValue(field) !== undefined
   }, [getPrefilledValue])
@@ -465,18 +436,17 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 ---
 
-## Task 5: 改造 aiService — 新增 contextualAnalysis
+## Task 5: 改造前端 API 层 — contextualAnalysis
 
 **Files:**
-- Modify: `frontend/src/services/aiService.ts`
 - Modify: `frontend/src/services/api.ts`
+- Modify: `frontend/src/services/aiService.ts`
 
-- [ ] **Step 1: 改造 api.ts — 新增 contextualAnalysis API**
+- [ ] **Step 1: 改造 api.ts**
 
 ```typescript
-// 在 api.ts 的 ai 对象中新增
+// 在 api.ts 的 ai 对象末尾追加（保持现有方法不变）
 
-// AI
 export const ai = {
   // ... 现有方法 ...
   contextualAnalysis: (params: {
@@ -492,10 +462,10 @@ export const ai = {
 }
 ```
 
-- [ ] **Step 2: 改造 aiService.ts — 新增 contextualAnalysis 方法**
+- [ ] **Step 2: 改造 aiService.ts**
 
 ```typescript
-// frontend/src/services/aiService.ts
+// 在 aiService.ts 中追加新方法（保持现有方法不变）
 
 export const aiService = {
   // ... 现有方法 ...
@@ -539,7 +509,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 ---
 
-## Task 6: 后端 — 新增 ContextualAnalysisRequest Schema
+## Task 6: 后端 — 新增 Schema
 
 **Files:**
 - Modify: `backend/app/models/schemas.py`
@@ -547,12 +517,15 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 - [ ] **Step 1: 添加 ContextualAnalysisRequest**
 
 ```python
-# 在 backend/app/models/schemas.py 中添加
+# 在 backend/app/models/schemas.py 中添加（在文件末尾 import 区域添加）
 
 class ContextualAnalysisRequest(BaseModel):
     case_id: UUID
     current_step: int = Field(..., ge=1, le=9)
-    context_data: dict = Field(..., description="包含 case_summary、answers_this_step、previous_steps_summary、evidence_status、user_question")
+    context_data: dict = Field(
+        ...,
+        description="包含 case_summary、answers_this_step、previous_steps_summary、evidence_status、user_question"
+    )
 ```
 
 - [ ] **Step 2: 验证 Python 语法**
@@ -585,7 +558,6 @@ from app.agents.base_agent import BaseAgent
 from app.config import settings
 from langchain_qianwen import ChatQianwen
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import JsonOutputParser
 import json
 import re
 
@@ -601,23 +573,10 @@ class ContextualAnalysisAgent(BaseAgent):
         )
 
     async def run(self, input_data: dict) -> dict:
-        """
-        input_data 包含:
-        - case_id: UUID
-        - current_step: int
-        - context_data: {
-              case_summary: str,
-              answers_this_step: dict,
-              previous_steps_summary: dict,
-              evidence_status: dict,
-              user_question: str | None
-          }
-        """
         context_data = input_data.get("context_data", {})
         current_step = input_data.get("current_step", 1)
 
         template = self._build_prompt_template(current_step)
-
         prompt = ChatPromptTemplate.from_template(template)
         chain = prompt | self.llm
 
@@ -630,10 +589,10 @@ class ContextualAnalysisAgent(BaseAgent):
             "step_label": context_data.get("step_label", "")
         })
 
-        return self._parse_result(result, current_step)
+        return self._parse_result(result)
 
     def _build_prompt_template(self, current_step: int) -> str:
-        base_template = """你是一名劳动维权 AI 助手，正在帮助用户完成维权案件的填写。
+        base = """你是一名劳动维权 AI 助手，正在帮助用户完成维权案件的填写。
 
 当前步骤：{step_label}（第 {current_step} 步，共 9 步）
 
@@ -665,16 +624,15 @@ class ContextualAnalysisAgent(BaseAgent):
             "reason": "为什么给出这个建议"
         }}
     ],
-    "case_summary": "基于新信息更新的案件摘要（如果没有新信息可保持原样）"
+    "case_summary": "基于新信息更新的案件摘要"
 }}
 
 要求：
-- analysis 应该通俗易懂，用"您"称呼用户
+- analysis 应通俗易懂，用"您"称呼用户
 - suggestions 仅在置信度 >= 0.7 时生成
-- type 说明：field_correction=字段修正, missing_info=补充信息, risk_alert=风险提示, calculation=金额计算
+- type: field_correction=字段修正, missing_info=补充信息, risk_alert=风险提示, calculation=金额计算
 - 仅返回 JSON，不要有其他内容"""
 
-        # 针对不同步骤添加不同的知识参考
         fact_sheets = {
             1: "【法律参考】拖欠工资：用人单位应按时足额支付劳动报酬，不得无故拖欠。",
             2: "【法律参考】经济补偿金：根据《劳动合同法》第47条，工作满1年支付1个月工资作为经济补偿。",
@@ -685,14 +643,11 @@ class ContextualAnalysisAgent(BaseAgent):
         }
 
         fact_sheet = fact_sheets.get(current_step, "")
-        return base_template.replace("{fact_sheet}", fact_sheet)
+        return base.replace("{fact_sheet}", fact_sheet)
 
-    def _parse_result(self, result, current_step: int) -> dict:
-        """解析 LLM 返回结果"""
+    def _parse_result(self, result) -> dict:
         output = result.content if hasattr(result, 'content') else str(result)
-
         try:
-            # 尝试提取 JSON
             json_match = re.search(r'\{.*\}', output, re.DOTALL)
             if json_match:
                 parsed = json.loads(json_match.group())
@@ -703,13 +658,7 @@ class ContextualAnalysisAgent(BaseAgent):
                 }
         except json.JSONDecodeError:
             pass
-
-        # 解析失败时返回降级结果
-        return {
-            "analysis": output,
-            "suggestions": [],
-            "case_summary": ""
-        }
+        return {"analysis": output, "suggestions": [], "case_summary": ""}
 ```
 
 - [ ] **Step 2: 验证 Python 语法**
@@ -733,26 +682,19 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 **Files:**
 - Modify: `backend/app/api/ai.py`
 
-- [ ] **Step 1: 在 ai.py 中添加新端点**
+- [ ] **Step 1: 在 ai.py 文件末尾添加**
 
 ```python
 # 在 ai.py 文件末尾添加
 
-from app.models.schemas import ContextualAnalysisRequest
-
 @router.post("/contextual-analysis")
-async def contextual_analysis(
-    req: ContextualAnalysisRequest,
-    db: AsyncSession = Depends(get_db)
-):
+async def contextual_analysis(req: ContextualAnalysisRequest, db: AsyncSession = Depends(get_db)):
     """上下文分析接口 — 步骤完成时调用"""
-    # 获取案件信息
     case_repo = CaseRepository(db)
     case = await case_repo.get_by_id(req.case_id)
     if not case:
         raise HTTPException(404, "Case not found")
 
-    # 获取证据状态
     evidence_repo = EvidenceRepository(db)
     evidence_list = await evidence_repo.get_by_case_id(req.case_id)
     evidence_status = {
@@ -762,11 +704,9 @@ async def contextual_analysis(
         "has_termination_proof": any(e.name and ('辞退' in e.name or '解除' in e.name) for e in evidence_list)
     }
 
-    # 构建 context_data
     context_data = req.context_data.copy()
     context_data["evidence_status"] = evidence_status
 
-    # 调用 Agent
     agent = ContextualAnalysisAgent()
     result = await agent.run({
         "case_id": str(req.case_id),
@@ -774,7 +714,6 @@ async def contextual_analysis(
         "context_data": context_data
     })
 
-    # 如果返回了新摘要，更新案件
     if result.get("case_summary"):
         await case_repo.update_description(req.case_id, result["case_summary"])
 
@@ -802,7 +741,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 **Files:**
 - Create: `frontend/src/components/ai/AISuggestionCard.tsx`
 
-- [ ] **Step 1: 创建 AISuggestionCard 组件**
+- [ ] **Step 1: 创建 AISuggestionCard**
 
 ```tsx
 // frontend/src/components/ai/AISuggestionCard.tsx
@@ -824,107 +763,35 @@ const TYPE_LABELS: Record<string, { icon: string; label: string }> = {
 
 export function AISuggestionCard({ suggestion }: AISuggestionCardProps) {
   const { accept, dismiss } = useAISuggestion()
-
   const typeInfo = TYPE_LABELS[suggestion.type] || { icon: '💡', label: '建议' }
-  const showConfidenceTag = suggestion.confidence < 0.9
-
-  const handleAccept = () => {
-    accept(suggestion.id)
-  }
-
-  const handleDismiss = () => {
-    dismiss(suggestion.id)
-  }
+  const showAiTag = suggestion.confidence < 0.9
 
   const formatValue = (value: unknown): string => {
-    if (typeof value === 'number') {
-      return value.toLocaleString('zh-CN')
-    }
+    if (typeof value === 'number') return value.toLocaleString('zh-CN')
     return String(value)
   }
 
   return (
-    <div
-      style={{
-        border: '1px solid #e0e0e0',
-        borderRadius: '8px',
-        padding: '12px',
-        marginBottom: '8px',
-        backgroundColor: '#fff',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.08)'
-      }}
-    >
-      {/* Header */}
+    <div style={{ border: '1px solid #e0e0e0', borderRadius: '8px', padding: '12px', marginBottom: '8px', backgroundColor: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
         <span>{typeInfo.icon}</span>
         <span style={{ fontWeight: 500, fontSize: '14px' }}>{typeInfo.label}</span>
-        {showConfidenceTag && (
-          <span
-            style={{
-              fontSize: '11px',
-              padding: '2px 6px',
-              borderRadius: '4px',
-              backgroundColor: '#f0f0ff',
-              color: '#667eea'
-            }}
-          >
+        {showAiTag && (
+          <span style={{ fontSize: '11px', padding: '2px 6px', borderRadius: '4px', backgroundColor: '#f0f0ff', color: '#667eea' }}>
             AI参考
           </span>
         )}
       </div>
-
-      {/* Field label and suggested value */}
       <div style={{ marginBottom: '8px' }}>
         <span style={{ color: '#666', fontSize: '13px' }}>{suggestion.fieldLabel}: </span>
-        <span style={{ fontWeight: 500, fontSize: '14px', color: '#333' }}>
-          {formatValue(suggestion.suggestedValue)}
-        </span>
+        <span style={{ fontWeight: 500, fontSize: '14px', color: '#333' }}>{formatValue(suggestion.suggestedValue)}</span>
       </div>
-
-      {/* Reason */}
-      <div
-        style={{
-          fontSize: '12px',
-          color: '#888',
-          marginBottom: '10px',
-          lineHeight: 1.4
-        }}
-      >
+      <div style={{ fontSize: '12px', color: '#888', marginBottom: '10px', lineHeight: 1.4 }}>
         {suggestion.reason}
       </div>
-
-      {/* Actions */}
       <div style={{ display: 'flex', gap: '8px' }}>
-        <button
-          onClick={handleAccept}
-          style={{
-            flex: 1,
-            padding: '6px 12px',
-            borderRadius: '6px',
-            border: 'none',
-            backgroundColor: '#667eea',
-            color: 'white',
-            fontSize: '13px',
-            cursor: 'pointer'
-          }}
-        >
-          确认
-        </button>
-        <button
-          onClick={handleDismiss}
-          style={{
-            flex: 1,
-            padding: '6px 12px',
-            borderRadius: '6px',
-            border: '1px solid #ddd',
-            backgroundColor: 'white',
-            color: '#666',
-            fontSize: '13px',
-            cursor: 'pointer'
-          }}
-        >
-          忽略
-        </button>
+        <button onClick={() => accept(suggestion.id)} style={{ flex: 1, padding: '6px 12px', borderRadius: '6px', border: 'none', backgroundColor: '#667eea', color: 'white', fontSize: '13px', cursor: 'pointer' }}>确认</button>
+        <button onClick={() => dismiss(suggestion.id)} style={{ flex: 1, padding: '6px 12px', borderRadius: '6px', border: '1px solid #ddd', backgroundColor: 'white', color: '#666', fontSize: '13px', cursor: 'pointer' }}>忽略</button>
       </div>
     </div>
   )
@@ -947,12 +814,12 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 ---
 
-## Task 10: 改造 AIChatPanel — 渲染建议卡片 + 对话历史
+## Task 10: 改造 AIChatPanel — 渲染建议卡片 + 对话 + 用户主动聊天
 
 **Files:**
 - Modify: `frontend/src/components/ai/AIChatPanel.tsx`
 
-- [ ] **Step 1: 替换 AIChatPanel 组件**
+- [ ] **Step 1: 替换 AIChatPanel（完全重写）**
 
 ```tsx
 // frontend/src/components/ai/AIChatPanel.tsx
@@ -960,142 +827,72 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 import React, { useState, useRef, useEffect } from 'react'
 import { useCaseStore, AIMessage } from '../../stores/caseStore'
 import { useAIContextStore } from '../../stores/aiContextStore'
-import { useAIContext } from '../../hooks/useAIContext'
 import { useAISuggestion } from '../../hooks/useAISuggestion'
 import { AISuggestionCard } from './AISuggestionCard'
 
 export function AIChatPanel() {
   const { caseId, aiMessages, addAIMessage, pendingSuggestions } = useCaseStore()
   const { isAnalyzing } = useAIContextStore()
-  const { analyzeCurrentStep } = useAIContext()
-  const { pendingSuggestions: suggestions } = useAISuggestion()
 
   const [message, setMessage] = useState('')
   const [isSending, setIsSending] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
-  // 自动滚动到底部
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [aiMessages, pendingSuggestions])
 
   const handleSend = async () => {
-    if (!message.trim() || isSending) return
+    if (!message.trim() || isSending || !caseId) return
 
     const userMessage = message.trim()
     setMessage('')
     setIsSending(true)
 
-    // 添加用户消息
-    addAIMessage({
-      id: `msg_${Date.now()}`,
-      role: 'user',
-      content: userMessage,
-      timestamp: Date.now()
-    })
+    addAIMessage({ id: `msg_${Date.now()}`, role: 'user', content: userMessage, timestamp: Date.now() })
 
     try {
-      // TODO: 调用 AI 消息回复接口（复用 review 接口）
       const { aiService } = await import('../../services/aiService')
+      // 用户主动聊天时，将当前案件上下文一并发送
       const result = await aiService.review({ caseId }, userMessage)
-
       addAIMessage({
         id: `msg_${Date.now()}`,
         role: 'assistant',
         content: result.review || '收到您的问题，请稍候。',
         timestamp: Date.now()
       })
-    } catch (error) {
-      addAIMessage({
-        id: `msg_${Date.now()}`,
-        role: 'assistant',
-        content: '抱歉，发生了错误，请稍后再试。',
-        timestamp: Date.now()
-      })
+    } catch {
+      addAIMessage({ id: `msg_${Date.now()}`, role: 'assistant', content: '抱歉，发生了错误，请稍后再试。', timestamp: Date.now() })
     } finally {
       setIsSending(false)
     }
   }
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        width: '320px',
-        borderLeft: '1px solid #e0e0e0',
-        backgroundColor: '#fafafa'
-      }}
-    >
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', width: '320px', borderLeft: '1px solid #e0e0e0', backgroundColor: '#fafafa' }}>
       {/* Header */}
-      <div
-        style={{
-          padding: '16px',
-          borderBottom: '1px solid #e0e0e0',
-          backgroundColor: 'white'
-        }}
-      >
+      <div style={{ padding: '16px', borderBottom: '1px solid #e0e0e0', backgroundColor: 'white' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <span style={{ fontSize: '20px' }}>🤖</span>
           <span style={{ fontWeight: 600, fontSize: '16px' }}>AI 助手</span>
         </div>
-        {isAnalyzing && (
-          <div
-            style={{
-              marginTop: '8px',
-              fontSize: '12px',
-              color: '#667eea'
-            }}
-          >
-            分析中...
-          </div>
-        )}
+        {isAnalyzing && <div style={{ marginTop: '8px', fontSize: '12px', color: '#667eea' }}>分析中...</div>}
       </div>
 
       {/* Chat History */}
-      <div
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '16px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '12px'
-        }}
-      >
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
         {aiMessages.length === 0 && !isAnalyzing && (
-          <div
-            style={{
-              textAlign: 'center',
-              color: '#999',
-              padding: '32px 16px',
-              fontSize: '14px'
-            }}
-          >
+          <div style={{ textAlign: 'center', color: '#999', padding: '32px 16px', fontSize: '14px' }}>
             完成当前步骤后，AI 将自动分析并提供建议
           </div>
         )}
 
-        {aiMessages.map((msg) => (
-          <ChatMessage key={msg.id} message={msg} />
-        ))}
+        {aiMessages.map((msg) => <ChatMessage key={msg.id} message={msg} />)}
 
-        {/* 建议卡片在最后一个 assistant 消息后显示 */}
         {pendingSuggestions.length > 0 && aiMessages.length > 0 && (
           <div style={{ marginTop: '8px' }}>
-            <div
-              style={{
-                fontSize: '12px',
-                color: '#666',
-                marginBottom: '8px'
-              }}
-            >
-              💡 发现以下可优化项：
-            </div>
-            {pendingSuggestions.map((suggestion) => (
-              <AISuggestionCard key={suggestion.id} suggestion={suggestion} />
-            ))}
+            <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>💡 发现以下可优化项：</div>
+            {pendingSuggestions.map((s) => <AISuggestionCard key={s.id} suggestion={s} />)}
           </div>
         )}
 
@@ -1103,43 +900,17 @@ export function AIChatPanel() {
       </div>
 
       {/* Input */}
-      <div
-        style={{
-          padding: '12px',
-          borderTop: '1px solid #e0e0e0',
-          backgroundColor: 'white'
-        }}
-      >
+      <div style={{ padding: '12px', borderTop: '1px solid #e0e0e0', backgroundColor: 'white' }}>
         <div style={{ display: 'flex', gap: '8px' }}>
           <input
-            type="text"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="输入您的问题..."
-            onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
+            type="text" value={message} onChange={(e) => setMessage(e.target.value)}
+            placeholder="输入您的问题..." onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
             disabled={isSending}
-            style={{
-              flex: 1,
-              padding: '10px 12px',
-              borderRadius: '8px',
-              border: '1px solid #ddd',
-              fontSize: '14px',
-              outline: 'none'
-            }}
+            style={{ flex: 1, padding: '10px 12px', borderRadius: '8px', border: '1px solid #ddd', fontSize: '14px', outline: 'none' }}
           />
           <button
-            onClick={handleSend}
-            disabled={isSending || !message.trim()}
-            style={{
-              padding: '10px 16px',
-              borderRadius: '8px',
-              border: 'none',
-              backgroundColor: '#667eea',
-              color: 'white',
-              fontSize: '14px',
-              cursor: isSending ? 'not-allowed' : 'pointer',
-              opacity: isSending ? 0.7 : 1
-            }}
+            onClick={handleSend} disabled={isSending || !message.trim()}
+            style={{ padding: '10px 16px', borderRadius: '8px', border: 'none', backgroundColor: '#667eea', color: 'white', fontSize: '14px', cursor: isSending ? 'not-allowed' : 'pointer', opacity: isSending ? 0.7 : 1 }}
           >
             {isSending ? '...' : '发送'}
           </button>
@@ -1151,41 +922,17 @@ export function AIChatPanel() {
 
 function ChatMessage({ message }: { message: AIMessage }) {
   const isUser = message.role === 'user'
-
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: isUser ? 'flex-end' : 'flex-start'
-      }}
-    >
-      <div
-        style={{
-          maxWidth: '85%',
-          padding: '10px 14px',
-          borderRadius: isUser ? '12px 12px 0 12px' : '12px 12px 12px 0',
-          backgroundColor: isUser ? '#667eea' : 'white',
-          color: isUser ? 'white' : '#333',
-          fontSize: '14px',
-          lineHeight: 1.5,
-          boxShadow: '0 1px 2px rgba(0,0,0,0.08)',
-          whiteSpace: 'pre-wrap'
-        }}
-      >
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: isUser ? 'flex-end' : 'flex-start' }}>
+      <div style={{
+        maxWidth: '85%', padding: '10px 14px', borderRadius: isUser ? '12px 12px 0 12px' : '12px 12px 12px 0',
+        backgroundColor: isUser ? '#667eea' : 'white', color: isUser ? 'white' : '#333', fontSize: '14px',
+        lineHeight: 1.5, boxShadow: '0 1px 2px rgba(0,0,0,0.08)', whiteSpace: 'pre-wrap'
+      }}>
         {message.content}
       </div>
-      <span
-        style={{
-          fontSize: '11px',
-          color: '#bbb',
-          marginTop: '4px'
-        }}
-      >
-        {new Date(message.timestamp).toLocaleTimeString('zh-CN', {
-          hour: '2-digit',
-          minute: '2-digit'
-        })}
+      <span style={{ fontSize: '11px', color: '#bbb', marginTop: '4px' }}>
+        {new Date(message.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}
       </span>
     </div>
   )
@@ -1201,7 +948,7 @@ Expected: 无新增 error
 
 ```bash
 git add frontend/src/components/ai/AIChatPanel.tsx
-git commit -m "feat(ai): rewrite AIChatPanel with suggestion cards and chat history
+git commit -m "feat(ai): rewrite AIChatPanel with suggestion cards and user chat
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
@@ -1213,7 +960,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 **Files:**
 - Create: `frontend/src/components/layout/AppShell.tsx`
 
-- [ ] **Step 1: 创建 AppShell 组件**
+- [ ] **Step 1: 创建 AppShell**
 
 ```tsx
 // frontend/src/components/layout/AppShell.tsx
@@ -1224,19 +971,10 @@ import { AIChatPanel } from '../ai/AIChatPanel'
 
 export function AppShell() {
   return (
-    <div
-      style={{
-        display: 'flex',
-        height: '100vh',
-        overflow: 'hidden'
-      }}
-    >
-      {/* 主内容区 */}
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
       <div style={{ flex: 1, overflowY: 'auto' }}>
         <Outlet />
       </div>
-
-      {/* AI 侧边栏 */}
       <AIChatPanel />
     </div>
   )
@@ -1252,7 +990,7 @@ Expected: 无新增 error
 
 ```bash
 git add frontend/src/components/layout/AppShell.tsx
-git commit -m "feat(layout): add AppShell with sidebar layout
+git commit -m "feat(layout): add AppShell with sidebar
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
@@ -1279,14 +1017,10 @@ function App() {
   return (
     <div className="app">
       <Routes>
-        {/* Home 不使用 AppShell（无侧边栏） */}
         <Route path="/" element={<Home />} />
-
-        {/* CaseWizard 使用 AppShell（带侧边栏） */}
         <Route element={<AppShell />}>
           <Route path="/case" element={<CaseWizard />} />
         </Route>
-
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </div>
@@ -1312,7 +1046,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 
 ---
 
-## Task 13: 改造 CaseWizard — 集成步骤完成触发
+## Task 13: 改造 CaseWizard — 步骤完成触发 AI 分析
 
 **Files:**
 - Modify: `frontend/src/pages/CaseWizard.tsx`
@@ -1322,7 +1056,7 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```tsx
 // frontend/src/pages/CaseWizard.tsx
 
-import React from 'react'
+import React, { useEffect } from 'react'
 import { StepWizard } from '../components/layout/StepWizard'
 import { StepContent } from '../components/layout/StepContent'
 import { useCaseStore } from '../stores/caseStore'
@@ -1330,19 +1064,16 @@ import { useStep } from '../hooks/useStep'
 import { useAIContext } from '../hooks/useAIContext'
 
 export function CaseWizard() {
-  const { currentStep, nextStep, prevStep, canGoNext, canGoPrev } = useStep()
-  const { status } = useCaseStore()
+  const { nextStep, prevStep, canGoNext, canGoPrev } = useStep()
+  const { status, currentStep } = useCaseStore()
   const { analyzeCurrentStep } = useAIContext()
 
-  const handleNextStep = async () => {
-    // 先推进步骤
-    await nextStep()
-    // 步骤推进后，触发 AI 分析
-    // 使用 setTimeout 确保状态已更新
-    setTimeout(() => {
+  // 当 currentStep 变化时（用户点击"下一步"），触发 AI 分析
+  useEffect(() => {
+    if (currentStep > 1) {
       analyzeCurrentStep()
-    }, 100)
-  }
+    }
+  }, [currentStep])
 
   return (
     <div className="case-wizard">
@@ -1351,17 +1082,9 @@ export function CaseWizard() {
         <StepContent />
       </div>
       <div className="navigation">
-        {canGoPrev && (
-          <button className="btn-secondary" onClick={prevStep}>
-            上一步
-          </button>
-        )}
+        {canGoPrev && <button className="btn-secondary" onClick={prevStep}>上一步</button>}
         {canGoNext && (
-          <button
-            className="btn-primary"
-            onClick={handleNextStep}
-            disabled={status === 'loading'}
-          >
+          <button className="btn-primary" onClick={nextStep} disabled={status === 'loading'}>
             下一步
           </button>
         )}
@@ -1370,6 +1093,8 @@ export function CaseWizard() {
   )
 }
 ```
+
+> **说明**: 之前计划使用 `setTimeout` 是为了等待 React 状态更新。改用 `useEffect` 监听 `currentStep` 变化可以正确响应状态更新，避免竞态条件。
 
 - [ ] **Step 2: 验证编译**
 
@@ -1380,109 +1105,67 @@ Expected: 无新增 error
 
 ```bash
 git add frontend/src/pages/CaseWizard.tsx
-git commit -m "feat(wizard): trigger AI analysis on step completion
+git commit -m "feat(wizard): trigger AI analysis on step change via useEffect
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ```
 
 ---
 
-## Task 14: 改造 StepContent — 保存步骤数据
+## Task 14: 改造 StepContent — 保持现有渲染逻辑
 
 **Files:**
 - Modify: `frontend/src/components/layout/StepContent.tsx`
 
-- [ ] **Step 1: 读取现有 StepContent.tsx 并改造**
+- [ ] **Step 1: 读取 StepContent.tsx 现有内容**
 
-由于我们尚未读取 StepContent.tsx 的完整内容，先读取：
-
-```bash
-cat frontend/src/components/layout/StepContent.tsx
-```
-
-然后替换为以下内容（假设现有内容是简单的 switch 渲染）：
+现有 `StepContent.tsx` 内容为：
 
 ```tsx
-// frontend/src/components/layout/StepContent.tsx
-
 import React from 'react'
+import { useStep } from '../../hooks/useStep'
 import { CauseSelector } from '../business/CauseSelector'
 import { QuestionCard } from '../business/QuestionCard'
-import { EvidenceUploader } from '../business/EvidenceUploader'
-import { EvidenceStatusBoard } from '../business/EvidenceStatusBoard'
-import { DocumentPreview } from '../business/DocumentPreview'
+import { AIChatPanel } from '../ai/AIChatPanel'
+import { AIFeedbackCard } from '../ai/AIFeedbackCard'
 import { useCaseStore } from '../../stores/caseStore'
-import { useAISuggestion } from '../../hooks/useAISuggestion'
 
-interface StepContentProps {
-  step?: number  // 可选，默认从 store 读取
-}
-
-export function StepContent({ step: propStep }: StepContentProps) {
-  const { currentStep } = useCaseStore()
-  const step = propStep ?? currentStep
-  const { getPrefilledValue } = useAISuggestion()
+export function StepContent() {
+  const { currentStep } = useStep()
+  const { caseId } = useCaseStore()
 
   const renderStep = () => {
-    switch (step) {
+    switch (currentStep) {
       case 1:
         return <CauseSelector />
       case 2:
       case 3:
-        return <QuestionCard step={step} />
+        return <QuestionCard step={currentStep} />
       case 4:
-        return (
-          <div>
-            <AIFeedbackCard title="案情分析" />
-          </div>
-        )
-      case 5:
-        return (
-          <div>
-            <EvidenceStatusBoard />
-            <EvidenceUploader />
-          </div>
-        )
       case 6:
-        return <AIFeedbackCard title="风险评估" />
-      case 7:
-        return <DocumentPreview />
-      case 8:
-        return <RoadmapFlow />
+        return <AIFeedbackCard title={currentStep === 4 ? "案情分析" : "风险评估"} />
       case 9:
-        return <AIFeedbackCard title="复核" />
+        return <AIChatPanel caseId={caseId || ''} />
       default:
-        return <div>未知步骤</div>
+        return <div className="placeholder">该步骤功能开发中</div>
     }
   }
 
-  return (
-    <div className="step-content">
-      {renderStep()}
-    </div>
-  )
+  return <div className="step-content">{renderStep()}</div>
 }
 ```
 
-> **注意**: 上述 StepContent 为简化版。如果现有 StepContent.tsx 有更复杂的逻辑，需要保留原有逻辑并在保存数据的位置（如 QuestionCard 的 onSubmit）调用 `setStepData`。
+**本任务不做任何改动**。现有 StepContent.tsx 的渲染逻辑完全保留，不需要修改。
 
-**核心改造原则**：
-- 在用户填写/修改数据时，调用 `useCaseStore.getState().setStepData(currentStep, data)` 保存数据
-- 确保 AI 分析时能读取到完整的步骤数据
+> **数据保存说明**: StepContent 仅负责渲染。数据保存由各个表单组件负责：- `CauseSelector` / `QuestionCard` 等在用户填写/提交数据时，需调用 `useCaseStore.getState().setStepData(currentStep, { fieldId: value })` 保存数据到 store。
+> - 后续可以逐步改造各表单组件，在数据变化时自动同步到 store。
 
-- [ ] **Step 2: 验证编译**
+- [ ] **Step 2: 验证编译（无需改动，验证通过即可）**
 
-Run: `cd frontend && npx tsc --noEmit 2>&1 | head -20`
-Expected: 无新增 error（可能有现有警告）
+Run: `cd frontend && npx tsc --noEmit 2>&1 | head -10`
+Expected: 无新增 error
 
-- [ ] **Step 3: 提交**
-
-```bash
-git add frontend/src/components/layout/StepContent.tsx
-git commit -m "feat(content): save step data to store on change
-
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
-```
+- [ ] **Step 3: 提交（无需改动，跳过）**
 
 ---
 
@@ -1500,15 +1183,15 @@ Expected: Vite dev server 启动
 
 - [ ] **Step 3: 手动测试流程**
 
-1. 打开浏览器访问 http://localhost:3000
-2. 点击进入"我要维权"
-3. 进入 CaseWizard，确认右侧 AI 侧边栏可见
-4. 在 Step 1 选择"AI问答"模式
-5. 点击"下一步"，观察右侧是否出现 AI 分析结果
-6. 如果出现建议卡片，点击"确认"观察数据回填
+1. 访问 http://localhost:3000，点击进入"我要维权"
+2. 确认右侧 AI 侧边栏可见
+3. 在 Step 1 选择"AI问答"模式，点击"下一步"
+4. 观察右侧是否出现 AI 分析结果和建议卡片
+5. 点击建议卡片"确认"，观察高亮回填效果
+6. 继续下一步，在 Step 2-3 填写数据后测试 AI 分析
 7. 检查浏览器 console 是否有错误
 
-- [ ] **Step 4: 提交集成测试结果**
+- [ ] **Step 4: 提交**
 
 ```bash
 git add -A
@@ -1522,16 +1205,17 @@ Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 ## 实施顺序
 
 1. **Task 1-2**: caseStore + aiContextStore（状态基础）
-2. **Task 3-4**: Hooks（useAIContext + useAISuggestion）
-3. **Task 5**: 前端 API 层
+2. **Task 3-4**: useAIContext + useAISuggestion Hooks
+3. **Task 5**: 前端 API 层（api.ts + aiService.ts）
 4. **Task 6-8**: 后端（Schema + Agent + 端点）
 5. **Task 9**: AISuggestionCard 组件
 6. **Task 10**: AIChatPanel 改造
 7. **Task 11-12**: AppShell + App.tsx 路由
-8. **Task 13-14**: CaseWizard + StepContent 联动
-9. **Task 15**: 端到端测试
+8. **Task 13**: CaseWizard useEffect 触发
+9. **Task 14**: StepContent 保持不变（数据保存由表单组件负责）
+10. **Task 15**: 端到端测试
 
 ---
 
-*计划版本: v1.0*
+*计划版本: v1.1*
 *生成日期: 2026-04-14*
