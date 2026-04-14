@@ -142,31 +142,38 @@ async def ai_review(case_data: dict = Body(...), user_question: Optional[str] = 
 @router.post("/contextual-analysis")
 async def contextual_analysis(req: ContextualAnalysisRequest, db: AsyncSession = Depends(get_db)):
     """上下文分析接口 — 步骤完成时调用"""
-    case_repo = CaseRepository(db)
-    case = await case_repo.get_by_id(req.case_id)
-    if not case:
-        raise HTTPException(404, "Case not found")
+    try:
+        case_repo = CaseRepository(db)
+        case = await case_repo.get_by_id(req.case_id)
+        if not case:
+            raise HTTPException(404, "Case not found")
 
-    evidence_repo = EvidenceRepository(db)
-    evidence_list = await evidence_repo.get_by_case_id(req.case_id)
-    evidence_status = {
-        "total": len(evidence_list),
-        "has_labor_contract": any(e.name and '劳动合同' in e.name for e in evidence_list),
-        "has_salary_record": any(e.name and '工资' in e.name for e in evidence_list),
-        "has_termination_proof": any(e.name and ('辞退' in e.name or '解除' in e.name) for e in evidence_list)
-    }
+        evidence_repo = EvidenceRepository(db)
+        evidence_list = await evidence_repo.get_by_case_id(req.case_id)
+        evidence_status = {
+            "total": len(evidence_list),
+            "has_labor_contract": any(e.name and '劳动合同' in e.name for e in evidence_list),
+            "has_salary_record": any(e.name and '工资' in e.name for e in evidence_list),
+            "has_termination_proof": any(e.name and ('辞退' in e.name or '解除' in e.name) for e in evidence_list)
+        }
 
-    context_data = req.context_data.copy()
-    context_data["evidence_status"] = evidence_status
+        context_data = req.context_data.copy()
+        context_data["evidence_status"] = evidence_status
 
-    agent = ContextualAnalysisAgent()
-    result = await agent.run({
-        "case_id": str(req.case_id),
-        "current_step": req.current_step,
-        "context_data": context_data
-    })
+        agent = ContextualAnalysisAgent()
+        result = await agent.run({
+            "case_id": str(req.case_id),
+            "current_step": req.current_step,
+            "context_data": context_data
+        })
 
-    if result.get("case_summary"):
-        await case_repo.update_description(req.case_id, result["case_summary"])
+        if result.get("case_summary"):
+            await case_repo.update_description(req.case_id, result["case_summary"])
 
-    return result
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(500, str(e))

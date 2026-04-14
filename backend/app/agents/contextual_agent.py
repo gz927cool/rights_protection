@@ -1,6 +1,6 @@
 from app.agents.base_agent import BaseAgent
 from app.config import settings
-from langchain_qianwen import ChatQianwen
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 import json
 import re
@@ -12,9 +12,12 @@ class ContextualAnalysisAgent(BaseAgent):
     def __init__(self):
         self.llm = None
         try:
-            self.llm = ChatQianwen(
+            api_key = settings.QWEN_API_KEY or settings.OPENAI_API_KEY
+            base_url = settings.OPENAI_BASE_URL or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            self.llm = ChatOpenAI(
                 model="qwen-plus",
-                qianwen_api_key=settings.QWEN_API_KEY,
+                api_key=api_key,
+                base_url=base_url,
                 temperature=0.3
             )
         except Exception:
@@ -41,7 +44,8 @@ class ContextualAnalysisAgent(BaseAgent):
             "previous_steps_summary": json.dumps(context_data.get("previous_steps_summary", {}), ensure_ascii=False),
             "evidence_status": json.dumps(context_data.get("evidence_status", {}), ensure_ascii=False),
             "user_question": context_data.get("user_question") or "无",
-            "step_label": context_data.get("step_label", "")
+            "step_label": context_data.get("step_label", ""),
+            "current_step": current_step
         })
 
         return self._parse_result(result)
