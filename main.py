@@ -1,6 +1,365 @@
-def main():
-    print("Hello from rights-protection-project!")
+"""
+FastAPI 聊天接口 - 九步劳动争议咨询系统
 
+提供类 ChatGPT 的流式聊天体验。
+"""
+import uuid
+import os
+import base64
+from typing import Optional, AsyncIterator
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+import uvicorn
+
+from langgraph.graph import START, END
+from langgraph.checkpoint.memory import InMemorySaver
+
+from langgraph_model.consultation_graph import get_consultation_graph
+from langgraph_model.consultation_state import (
+    create_initial_state,
+    STEP_DISPLAY_NAMES,
+    STEP_NAMES,
+)
+
+# ============================================================================
+# FastAPI App
+# ============================================================================
+
+app = FastAPI(
+    title="劳动争议智能咨询系统",
+    description="九步引导式劳动争议咨询，流式输出",
+    version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================================
+# Lifespan
+# ============================================================================
+
+_checkpointer = InMemorySaver()
+
+_graph = None
+
+
+def get_graph():
+    global _graph
+    if _graph is None:
+        _graph = get_consultation_graph()
+    return _graph
+
+
+# ============================================================================
+# Request / Response Models
+# ============================================================================
+
+class ChatMessage(BaseModel):
+    content: str
+    session_id: Optional[str] = None
+    member_id: Optional[str] = None
+
+
+class ChatResponse(BaseModel):
+    session_id: str
+    message: str
+    finish_reason: str
+    current_step: int
+    current_step_name: str
+    done: bool
+
+
+class SessionInfo(BaseModel):
+    session_id: str
+    current_step: int
+    current_step_name: str
+    completed_steps: list
+
+
+@app.get("/")
+def root():
+    return {
+        "name": "劳动争议智能咨询系统",
+        "version": "1.0.0",
+        "docs": "/docs",
+    }
+
+
+@app.get("/sessions/{session_id}")
+def get_session(session_id: str) -> SessionInfo:
+    """查询会话状态"""
+    config = {"configurable": {"thread_id": session_id}}
+    graph = get_graph()
+
+    try:
+        state = graph.get_state(config)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        return SessionInfo(
+            session_id=session_id,
+            current_step=state.configurable.get("current_step", 1),
+            current_step_name=STEP_DISPLAY_NAMES.get(
+                STEP_NAMES[state.configurable.get("current_step", 1) - 1],
+                STEP_NAMES[state.configurable.get("current_step", 1) - 1],
+            ),
+            completed_steps=list(state.configurable.get("completed_steps", [])),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post("/chat")
+def post_chat(message: ChatMessage):
+    """
+    非流式聊天接口（简单场景）
+    """
+    session_id = message.session_id or str(uuid.uuid4())
+
+    config = {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": 100,
+    }
+
+    graph = get_graph()
+
+    # 初始化或获取状态
+    try:
+        existing = graph.get_state(config)
+        if existing is None:
+            state = create_initial_state(session_id, message.member_id)
+        else:
+            state = dict(existing.values) if hasattr(existing, "values") else dict(existing)
+    except Exception:
+        state = create_initial_state(session_id, message.member_id)
+
+    # 执行
+    from langchain_core.messages import HumanMessage
+
+    result = graph.invoke(
+        {
+            **state,
+            "messages": [HumanMessage(content=message.content)],
+        },
+        config=config,
+    )
+
+    # 提取最后一条 AI 消息
+    ai_message = ""
+    finish_reason = "stop"
+    for msg in reversed(result.get("messages", [])):
+        if hasattr(msg, "type") and msg.type == "ai":
+            ai_message = msg.content
+            finish_reason = msg.response_metadata.get("finish_reason", "stop") if hasattr(msg, "response_metadata") else "stop"
+            break
+
+    current_step = result.get("current_step", 1)
+
+    return {
+        "session_id": session_id,
+        "message": ai_message,
+        "finish_reason": finish_reason,
+        "current_step": current_step,
+        "current_step_name": STEP_DISPLAY_NAMES.get(STEP_NAMES[current_step - 1], STEP_NAMES[current_step - 1]),
+        "done": current_step >= 10,
+    }
+
+
+@app.post("/chat/stream")
+def post_chat_stream(message: ChatMessage):
+    """
+    流式聊天接口 - Server-Sent Events
+
+    使用说明：
+    - POST 请求，body: {"content": "用户消息", "session_id": "可选"}
+    - 返回 SSE 流式响应
+    - 每个事件: data: {"content": "...", "done": false}\n\n
+    - 结束事件: data: {"done": true, "current_step": N}\n\n
+    """
+    import json as _json
+
+    session_id = message.session_id or str(uuid.uuid4())
+
+    config = {
+        "configurable": {"thread_id": session_id},
+        "recursion_limit": 100,
+    }
+
+    graph = get_graph()
+
+    # 初始化或获取状态
+    try:
+        existing = graph.get_state(config)
+        if existing is None:
+            state = create_initial_state(session_id, message.member_id)
+        else:
+            state = dict(existing.values) if hasattr(existing, "values") else dict(existing)
+    except Exception:
+        state = create_initial_state(session_id, message.member_id)
+
+    from langchain_core.messages import HumanMessage
+
+    def event_generator():
+        try:
+            # 用 stream 而非 invoke，收集所有 step chunks
+            current_step = 1
+            last_message_count = 0  # Track message count instead of using id()
+
+            for chunk in graph.stream(
+                {
+                    **state,
+                    "messages": [HumanMessage(content=message.content)],
+                },
+                config=config,
+            ):
+                # chunk = {"step_name": node_output}
+                for step_name, step_result in chunk.items():
+                    if isinstance(step_result, dict):
+                        messages = step_result.get("messages", [])
+
+                        # Only process NEW messages (messages added since last chunk)
+                        if len(messages) > last_message_count:
+                            new_messages = messages[last_message_count:]
+                            for msg in new_messages:
+                                if (
+                                    hasattr(msg, "type")
+                                    and msg.type == "ai"
+                                    and hasattr(msg, "content")
+                                    and msg.content
+                                ):
+                                    content = msg.content
+                                    payload = _json.dumps({"content": content, "done": False})
+                                    yield f"data: {payload}\n\n"
+                            last_message_count = len(messages)
+
+                        # 更新 current_step
+                        if "current_step" in step_result:
+                            current_step = step_result["current_step"]
+
+            # 结束事件
+            yield f"data: {_json.dumps({'done': True, 'current_step': current_step, 'session_id': session_id})}\n\n"
+        except Exception as e:
+            yield f"data: {_json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/upload/{session_id}")
+async def upload_evidence(
+    session_id: str,
+    file: UploadFile = File(...),
+    evidence_item_id: str = Form(...),
+):
+    """
+    证据文件上传接口
+    """
+    import uuid as uuid_lib
+
+    uploads_dir = f"data/uploads/{session_id}"
+    os.makedirs(uploads_dir, exist_ok=True)
+
+    file_id = f"file_{uuid_lib.uuid4().hex[:12]}"
+    safe_filename = f"{file_id}_{file.filename}"
+    stored_path = f"{uploads_dir}/{safe_filename}"
+
+    content = await file.read()
+    with open(stored_path, "wb") as f:
+        f.write(content)
+
+    # 更新 graph 状态
+    graph = get_graph()
+    config = {"configurable": {"thread_id": session_id}}
+
+    try:
+        state = graph.get_state(config)
+        if state and hasattr(state, "values"):
+            current_state = dict(state.values)
+        else:
+            current_state = dict(state) if state else {}
+    except Exception:
+        current_state = {}
+
+    evidence_files = current_state.get("evidence_files") or {}
+    from datetime import datetime
+    file_ref = {
+        "file_id": file_id,
+        "filename": file.filename,
+        "stored_path": stored_path,
+        "uploaded_at": datetime.now().isoformat(),
+        "evidence_item_id": evidence_item_id,
+    }
+    evidence_files[file_id] = file_ref
+
+    # 更新证据项的文件引用
+    evidence_items = current_state.get("evidence_items") or []
+    for item in evidence_items:
+        if item.get("id") == evidence_item_id:
+            refs = item.get("uploaded_file_refs") or []
+            refs.append(file_id)
+            item["uploaded_file_refs"] = refs
+            break
+
+    graph.update_state(config, {
+        "evidence_files": evidence_files,
+        "evidence_items": evidence_items,
+    })
+
+    return {
+        "file_id": file_id,
+        "filename": file.filename,
+        "stored_path": stored_path,
+    }
+
+
+@app.post("/sessions/{session_id}/reset")
+def reset_session(session_id: str):
+    """重置会话（重新开始）"""
+    config = {"configurable": {"thread_id": session_id}}
+    graph = get_graph()
+
+    try:
+        graph.delete_session(config)
+    except Exception:
+        pass
+
+    return {"status": "reset", "session_id": session_id}
+
+
+@app.get("/steps")
+def list_steps():
+    """列出所有步骤"""
+    return [
+        {"step": i + 1, "name": name, "display_name": STEP_DISPLAY_NAMES.get(name, name)}
+        for i, name in enumerate(STEP_NAMES)
+    ]
+
+
+# ============================================================================
+# Run
+# ============================================================================
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info",
+    )

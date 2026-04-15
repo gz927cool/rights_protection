@@ -9,6 +9,32 @@ from datetime import datetime
 from operator import add as messages_add
 
 
+def _merge_dicts(a: Dict, b: Dict) -> Dict:
+    """Merge two dicts recursively - b values take precedence."""
+    result = a.copy()
+    for k, v in b.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _merge_dicts(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def _union_sets(a, b):
+    """Union of two sets."""
+    return list(set(a) | set(b))
+
+
+def _last_writer(a, b):
+    """Last writer wins - used for scalars and objects."""
+    return b
+
+
+def _replace_list(a, b):
+    """Replace list with latest value (for evidence_items)."""
+    return b if isinstance(b, list) else a
+
+
 # ============================================================================
 # 步骤状态
 # ============================================================================
@@ -30,9 +56,11 @@ class EvidenceItem(TypedDict):
     id: str                            # 唯一标识
     name: str                          # 证据名称
     description: str                   # 通俗解释
-    category: Literal["必备", "加强"]  # 证据分类
+    category: Literal["必备", "加强", "兜底"]  # 证据分类
     tier: int                          # 1=最强 2=辅助 3=兜底
-    status: Literal["A", "B", "C"]     # A=已有 B=可补充 C=无法取得
+    suitability: List[str]             # 适用的案由
+    guidance_template: Optional[str]   # 获取指引模板ID
+    status: Literal["A", "B", "C", ""] # A=已有 B=可补充 C=无法取得 ""=未标记
     status_reason: Optional[str]       # 状态说明
     guidance: Optional[str]            # 获取指引（话术/操作指南）
     uploaded_file_refs: List[str]     # 上传文件ID列表
@@ -56,7 +84,20 @@ class RightItem(TypedDict):
     right_name: str                    # 权利名称
     amount: Optional[float]            # 金额
     calculation_basis: str              # 计算依据
+    legal_basis: str                   # 法律依据
     priority: int                      # 显示优先级
+
+
+# ============================================================================
+# 案件定性
+# ============================================================================
+
+class CaseQualification(TypedDict):
+    """案件定性结果"""
+    case_facts: str                    # 规范化案件事实描述
+    case_types: List[str]              # 三级案由编码列表
+    rights_list: List[RightItem]        # 权益清单
+    legal_basis: List[str]             # 法律依据索引
 
 
 # ============================================================================
@@ -76,7 +117,8 @@ class RiskAssessment(TypedDict):
     """风险评估结果"""
     level: Literal["高", "中", "低"]
     risk_points: List[RiskPoint]
-    summary: str                       # 综合概述
+    evidence_chain_evaluation: str     # 证据链评估
+    recommendations: List[str]         # 总体建议
 
 
 # ============================================================================
@@ -85,11 +127,35 @@ class RiskAssessment(TypedDict):
 
 class DocumentDraft(TypedDict):
     """文书草稿"""
-    template_type: Literal["仲裁申请书", "调解申请书"]
+    template_type: str                 # 文书模板类型
     content: str                       # 填充后的文书内容
     gaps: List[str]                    # 高亮标注的缺失字段
     created_at: str
     updated_at: str
+
+
+# ============================================================================
+# 路线图
+# ============================================================================
+
+class RoadmapStep(TypedDict):
+    """路线图单个步骤"""
+    step_name: str
+    step_title: str
+    suitable_scenario: str
+    operation_guide: str
+    speaking_template: Optional[str]
+    required_materials: List[str]
+    best_timing: str
+    cost: str
+    success_rate: Optional[str]
+
+
+class Roadmap(TypedDict):
+    """行动路线图"""
+    recommended_path: List[str]
+    steps: List[RoadmapStep]
+    mediation_phone: Optional[str]
 
 
 # ============================================================================
@@ -152,29 +218,31 @@ class ConsultationState(TypedDict):
     messages: Annotated[List[Any], messages_add]
 
     # --- 九步核心 ---
-    current_step: int  # 1-10, current step
-    completed_steps: set[int]          # 已完成步骤集合
-    step_data: Dict[str, StepData]      # 每步采集的数据
-    dirty_steps: set[int]               # 需重算的脏步骤
+    current_step: Annotated[int, _last_writer]  # 1-10, current step
+    completed_steps: Annotated[set[int], _union_sets]  # 已完成步骤集合
+    step_data: Annotated[Dict[str, StepData], _merge_dicts]  # 每步采集的数据
+    dirty_steps: Annotated[set[int], _union_sets]  # 需重算的脏步骤
 
     # --- 案件核心 ---
     case_category: Optional[str]        # 6大分类之一（欠薪/开除/工伤/调岗/社保/其他）
-    case_types: List[str]               # 案由列表（单一或组合）
-    case_facts: Optional[str]           # AI生成的案件事实描述
-    rights_list: List[RightItem]         # 权益清单
+    qualification: Optional[CaseQualification]  # 案件定性结果
     risk_assessment: Optional[RiskAssessment]  # 风险提示
+    roadmap: Optional[Roadmap]          # 行动路线图
 
     # --- 证据体系 ---
-    evidence_items: List[EvidenceItem]  # 证据清单
-    evidence_files: Dict[str, FileRef]  # 上传文件引用
+    evidence_items: Annotated[List[EvidenceItem], _replace_list]  # 证据清单
+    evidence_files: Annotated[Dict[str, FileRef], _merge_dicts]  # 上传文件引用
 
     # --- 文书 ---
     document_draft: Optional[DocumentDraft]  # 文书草稿
 
+    # --- 律师求助 ---
+    lawyer_help_status: Optional[Literal["pending", "sent", "replied"]]  # 律师求助状态
+
     # --- 元数据 ---
     session_id: str
     started_at: str                      # ISO格式
-    last_updated: str                   # ISO格式
+    last_updated: Annotated[str, _last_writer]  # ISO格式
     member_id: Optional[str]            # 会员ID（登录后填充）
     resume_token: Optional[str]         # 断点恢复token
 
@@ -184,6 +252,19 @@ class ConsultationInput(TypedDict):
     messages: Annotated[List[Any], messages_add]
     session_id: str
     member_id: Optional[str] = None
+    resume_token: Optional[str] = None
+    current_step: Optional[int] = 1
+    completed_steps: Optional[set] = None
+    step_data: Optional[Dict[str, StepData]] = None
+    dirty_steps: Optional[set] = None
+    case_category: Optional[str] = None
+    qualification: Optional[Any] = None
+    risk_assessment: Optional[Any] = None
+    roadmap: Optional[Any] = None
+    evidence_items: Optional[List[EvidenceItem]] = None
+    evidence_files: Optional[Dict[str, FileRef]] = None
+    document_draft: Optional[Any] = None
+    lawyer_help_status: Optional[str] = None
 
 
 # ============================================================================
@@ -223,13 +304,13 @@ def create_initial_state(
         "step_data": {},
         "dirty_steps": set(),
         "case_category": None,
-        "case_types": [],
-        "case_facts": None,
-        "rights_list": [],
+        "qualification": None,
         "risk_assessment": None,
+        "roadmap": None,
         "evidence_items": [],
         "evidence_files": {},
         "document_draft": None,
+        "lawyer_help_status": None,
         "session_id": session_id,
         "started_at": now,
         "last_updated": now,
@@ -277,3 +358,90 @@ def _recursive_parse(obj):
     elif isinstance(obj, list):
         return [_recursive_parse(item) for item in obj]
     return obj
+
+
+# ============================================================================
+# 证据数据加载工具
+# ============================================================================
+
+def get_evidence_checklist(case_category: str) -> List[EvidenceItem]:
+    """
+    根据案由加载对应的证据清单
+
+    Args:
+        case_category: 案由分类（欠薪/开除/工伤/调岗/社保/其他）
+
+    Returns:
+        证据项列表，每个证据项包含完整字段
+    """
+    try:
+        from data.consultation.evidence_data import EVIDENCE_CHECKLIST
+    except ImportError:
+        return []
+
+    items = EVIDENCE_CHECKLIST.get(case_category, [])
+    result = []
+    for item in items:
+        evidence_item: EvidenceItem = {
+            "id": item["id"],
+            "name": item["name"],
+            "description": item["description"],
+            "category": item["category"],
+            "tier": item["tier"],
+            "suitability": item.get("suitability", [case_category]),
+            "guidance_template": item.get("guidance_template"),
+            "status": "",
+            "status_reason": None,
+            "guidance": None,
+            "uploaded_file_refs": [],
+        }
+        result.append(evidence_item)
+    return result
+
+
+def get_evidence_guidance(template_key: str) -> Optional[Dict]:
+    """
+    获取证据收集指引
+
+    Args:
+        template_key: 指引模板的key
+
+    Returns:
+        指引内容字典，包含 title, steps, tips, alternative
+    """
+    try:
+        from data.consultation.evidence_guidance_templates import EVIDENCE_GUIDANCE_TEMPLATES
+        return EVIDENCE_GUIDANCE_TEMPLATES.get(template_key)
+    except ImportError:
+        return None
+
+
+def evaluate_evidence_completeness(evidence_items: List[EvidenceItem]) -> str:
+    """
+    评估证据完整度
+
+    Args:
+        evidence_items: 证据清单
+
+    Returns:
+        评级：充分/基本完整/不完整/严重缺乏
+    """
+    if not evidence_items:
+        return "严重缺乏"
+
+    total = len(evidence_items)
+    a_count = sum(1 for e in evidence_items if e.get("status") == "A")
+    b_count = sum(1 for e in evidence_items if e.get("status") == "B")
+    c_count = sum(1 for e in evidence_items if e.get("status") == "C")
+    unmarked = sum(1 for e in evidence_items if not e.get("status"))
+
+    # A类证据数量判断
+    if a_count == 0 and total > 0:
+        return "严重缺乏"
+    if a_count >= 3 and (a_count + b_count) / total >= 0.8:
+        return "充分"
+    if a_count >= 2 or (a_count + b_count) / total >= 0.6:
+        return "基本完整"
+    return "不完整"
+
+
