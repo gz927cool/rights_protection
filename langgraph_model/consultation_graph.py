@@ -7,6 +7,8 @@ Phase 3 重构版：
 - 动态注入：从 state 读取当前案件上下文注入到 prompt
 - Per-step tools：每步只暴露需要的工具
 """
+import json
+import re
 from typing import Annotated, Dict, List, Literal, Optional, Any, Callable
 from datetime import datetime
 from operator import add as messages_add
@@ -74,11 +76,33 @@ GLOBAL_CONTEXT = """## 系统信息
 - 用通俗易懂的语言解释法律术语
 - 注意识别用户情感状态，适当安抚
 
-## 工具调用原则
-- 优先直接回复用户问题
-- 只有在需要跳转到其他步骤时才调用 tool
-- proceed_to_next_step 是结束当前步骤的唯一方式
-- back_to_previous_step 用于返回修改
+## 工具调用原则（重要 - 必须遵守）
+当你需要执行一个动作（如跳转到下一步、返回上一步、暂停保存等）时，
+你必须在回复的最后一行输出一个 JSON 对象来指定要执行的命令。
+
+### 命令输出格式
+当需要跳转到下一步时，输出：
+{"tool":"proceed_to_next_step","route":"目标步骤","参数名":"参数值"}
+
+当需要返回上一步时，输出：
+{"tool":"back_to_previous_step","step_name":"步骤名称"}
+
+当需要暂停保存时，输出：
+{"tool":"pause_and_save"}
+
+当需要追问用户时，输出：
+{"tool":"request_missing_info","prompt":"追问内容"}
+
+当需要完成咨询时，输出：
+{"tool":"finish_consultation"}
+
+### 可用命令列表
+- proceed_to_next_step: 结束当前步骤，进入下一步（必须携带必要的参数）
+- back_to_previous_step: 返回上一步修改
+- request_missing_info: 追问用户缺失信息
+- pause_and_save: 暂停并保存进度
+- finish_consultation: 完成咨询
+- go_to_step: 跳转到指定步骤
 
 ## 状态字段说明
 当前案件状态（从 state 中注入）：
@@ -91,9 +115,10 @@ GLOBAL_CONTEXT = """## 系统信息
 你应该告知用户："检测到之前的回答有修改，当前内容已标记为待更新。"
 
 ## 严格遵守
-- 只使用明确提供给你的工具
-- 不要编造不存在的工具
+- 只使用上面列出的命令格式
+- 不要编造不存在的命令
 - 回复应当帮助用户完成当前步骤的任务
+- 每次回复最多只能包含一个命令
 """
 
 
@@ -122,17 +147,17 @@ STEP_PROMPTS: Dict[str, str] = {
 ## 回复格式要求（非常重要）
 你必须生成包含【文本回复】的消息！格式为：
 1. 第一部分：用自然语言向用户介绍两种模式（这是给用户看的）
-2. 第二部分：工具调用（包含 route 参数）
+2. 第二部分：命令输出（在最后一行输出 JSON 命令）
 
 注意：如果用户已经明确表达了选择（如"我想用AI"），你仍然需要用自然语言确认收到用户的选择，
-然后调用 proceed_to_next_step 工具。
+然后在回复末尾输出命令。
 
 ## 结束条件
-用户明确选择后，调用 proceed_to_next_step，携带：
-- route: "video_call" 或 "ai_consultation"
+用户明确选择后，输出命令：
+{"tool":"proceed_to_next_step","route":"ai_consultation"}
 
-## 工具限制
-本步骤可用工具：proceed_to_next_step, request_missing_info, pause_and_save
+## 命令限制
+本步骤可用命令：proceed_to_next_step, request_missing_info, pause_and_save
 """,
 
     "step2_initial": """## 本步任务：问题初判
@@ -671,8 +696,10 @@ def build_step_system_prompt(step_name: str, state: dict) -> str:
     dirty_steps = state.get("dirty_steps", set())
     completed_steps = state.get("completed_steps", set())
 
-    # 当前步骤是否脏
-    is_dirty = current_step in dirty_steps
+    # 当前步骤是否脏：只有当步骤已经完成又被标记为脏时才算脏
+    # 刚进入的步骤（未完成）不算脏
+    current_step_num = STEP_NAMES.index(step_name) + 1 if step_name in STEP_NAMES else current_step
+    is_dirty = current_step_num in dirty_steps and current_step_num in completed_steps
 
     # 构建上下文注入字符串
     context_lines = [
@@ -858,8 +885,8 @@ def proceed_to_next_step(
     updates: Dict[str, Any] = {
         "step_data": step_data,
         "current_step": target_step_num,
-        "completed_steps": (runtime.state.get("completed_steps", set()) or set()) | {current_step_num},
-        "dirty_steps": (runtime.state.get("dirty_steps", set()) or set()) | get_dirty_range(target_step_num),
+        "completed_steps": set(runtime.state.get("completed_steps", set()) or set()) | {current_step_num},
+        "dirty_steps": set(runtime.state.get("dirty_steps", set()) or set()) | get_dirty_range(target_step_num),
         "last_updated": datetime.now().isoformat(),
     }
 
@@ -876,14 +903,10 @@ def proceed_to_next_step(
         if case_category:
             updates["case_category"] = case_category
 
+    # 路由由 current_step 决定，这里只返回 state updates
     if target_step_num > 10:
-        return Command(goto=END, update=updates, graph=Command.PARENT)
-
-    return Command(
-        goto=STEP_NAMES[target_step_num - 1],
-        update=updates,
-        graph=Command.PARENT,
-    )
+        return updates  # graph 会自然结束
+    return updates
 
 
 @tool
@@ -900,17 +923,14 @@ def back_to_previous_step(
 ) -> Command:
     """返回指定步骤修改"""
     target_step_num = STEP_NAMES.index(step_name) + 1
-    existing_dirty = (runtime.state.get("dirty_steps", set()) or set()) | get_dirty_range(target_step_num)
+    existing_dirty = set(runtime.state.get("dirty_steps", set()) or set()) | get_dirty_range(target_step_num)
 
-    return Command(
-        goto=step_name,
-        update={
-            "current_step": target_step_num,
-            "dirty_steps": existing_dirty,
-            "last_updated": datetime.now().isoformat(),
-        },
-        graph=Command.PARENT,
-    )
+    # 路由由 current_step 决定，这里只返回 state updates
+    return {
+        "current_step": target_step_num,
+        "dirty_steps": existing_dirty,
+        "last_updated": datetime.now().isoformat(),
+    }
 
 
 @tool
@@ -1037,28 +1057,149 @@ def request_lawyer_help(runtime: ToolRuntime) -> str:
 
 
 # ============================================================================
-# Step Node 构建（使用 ToolExecutor 模式处理工具调用）
+# 文本命令解析器（替代 bind_tools）
+# ============================================================================
+
+def parse_text_command(text: str) -> tuple[Optional[str], Optional[Dict], Optional[str]]:
+    """
+    从 LLM 文本响应中解析命令。
+
+    支持三种格式：
+    1. [TOOL:tool_name:{"arg1": "value1", ...}]
+    2. {"tool_name": "tool_name", "parameters": {"arg1": "value1", ...}}
+    3. {"tool": "tool_name", "route": "value1", ...} (flattened args)
+
+    返回：(tool_name, args_dict, error_message)
+    如果没有找到命令格式，返回 (None, None, None)
+    """
+    # 格式1: [TOOL:tool_name:args_json]
+    pattern1 = r'\[TOOL:(\w+):(\{.*?\})\]'
+    match1 = re.search(pattern1, text, re.DOTALL)
+    if match1:
+        tool_name = match1.group(1)
+        args_json = match1.group(2)
+        try:
+            args = json.loads(args_json)
+            return (tool_name, args, None)
+        except json.JSONDecodeError as e:
+            return (None, None, f"JSON解析错误: {e}")
+
+    # 格式2: {"tool_name": "...", "parameters": {...}}
+    pattern2 = r'\{"tool_name"\s*:\s*"(\w+)"\s*,\s*"parameters"\s*:\s*(\{.*?\})\}'
+    match2 = re.search(pattern2, text, re.DOTALL)
+    if match2:
+        tool_name = match2.group(1)
+        args_json = match2.group(2)
+        try:
+            args = json.loads(args_json)
+            return (tool_name, args, None)
+        except json.JSONDecodeError as e:
+            return (None, None, f"JSON解析错误: {e}")
+
+    # 格式3: 直接解析整个文本为 JSON，取出 tool 和其他字段
+    # 尝试提取 {...} JSON 块
+    json_pattern = r'\{[^{}]*\}'
+    for match in re.finditer(json_pattern, text):
+        json_str = match.group()
+        try:
+            obj = json.loads(json_str)
+            if 'tool' in obj and isinstance(obj.get('tool'), str):
+                tool_name = obj['tool']
+                args = {k: v for k, v in obj.items() if k != 'tool'}
+                return (tool_name, args, None)
+        except json.JSONDecodeError:
+            continue
+
+    return (None, None, None)
+
+
+def execute_tool_command(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    state: Dict,
+    tools: List[Any],
+) -> tuple[Any, Optional[Dict], Optional[str]]:
+    """
+    执行解析出的工具命令。
+
+    返回：(result, command_update, error_message)
+    - result: 工具执行结果（用于展示给用户）
+    - command_update: 如果返回 Command 的 update 字典，则包含路由信息
+    - error_message: 错误信息
+    """
+    # 找到对应工具
+    matched_tool = None
+    for t in tools:
+        if t.name == tool_name:
+            matched_tool = t
+            break
+
+    if matched_tool is None:
+        return (None, None, f"未知工具: {tool_name}")
+
+    # 创建模拟 runtime 以传递 state
+    class MockRuntime:
+        pass
+    mock_runtime = MockRuntime()
+    mock_runtime.state = state
+
+    # 对于 proceed_to_next_step，映射 flat args 到 step_answers
+    if tool_name == "proceed_to_next_step":
+        # 如果有 route, case_category 等参数，包装成 step_answers
+        if "step_answers" not in tool_args and ("route" in tool_args or "case_category" in tool_args):
+            tool_args = {"step_answers": tool_args}
+
+    # 调用工具
+    try:
+        tool_result = matched_tool.func(runtime=mock_runtime, **tool_args)
+
+        # 检查是否返回 Command 或 plain dict
+        if isinstance(tool_result, Command):
+            if hasattr(tool_result, "goto") and tool_result.graph == Command.PARENT:
+                return (None, tool_result.update, tool_result.goto)
+            return (str(tool_result), None, None)
+        if isinstance(tool_result, dict):
+            # plain dict - 用于 current_step 驱动的路由，只取 update
+            return (None, tool_result, None)
+        return (str(tool_result), None, None)
+
+    except Exception as e:
+        return (None, None, f"工具执行错误: {e}")
+
+
+# ============================================================================
+# Step Node 构建（使用文本命令解析替代 bind_tools）
 # ============================================================================
 
 def _build_step_node(step_name: str):
     """
     为指定步骤构建一个 node 函数。
-    直接用 model.invoke() + 手动工具执行，保留 LLM 回复和工具调用。
+    使用文本格式接收 LLM 命令，替代 bind_tools 方案。
     """
     from langgraph.errors import ParentCommand
     from langchain_core.messages import ToolMessage
 
     tools = get_step_tools(step_name)
-    # 绑定工具，auto 模式让 LLM 决定是否调用
-    bound_model = model.bind_tools(tools, tool_choice="auto")
 
     def node(state: ConsultationState) -> Dict:
+        # 0. 自动加载证据清单（step6 首次进入时）
+        return_dict = {}
+        if step_name == "step6_evidence" and not state.get("evidence_items"):
+            case_category = state.get("case_category")
+            if case_category and case_category not in ("__VIDEO_CALL__",):
+                items = get_evidence_checklist(case_category)
+                if items:
+                    return_dict["evidence_items"] = items
+
         # 1. 动态构建带完整上下文的 system prompt
         system_prompt = build_step_system_prompt(step_name, state)
 
         # 2. 获取消息历史
         all_messages = state.get("messages", [])
         if not all_messages:
+            # 即使没有消息，也先返回证据清单（如果有的话）
+            if return_dict:
+                return return_dict
             return {"messages": []}
 
         # 3. 构造消息历史：SystemMessage(prompt) + 用户消息
@@ -1066,105 +1207,41 @@ def _build_step_node(step_name: str):
             SystemMessage(content=system_prompt),
         ] + all_messages
 
-        # 4. 第一轮：LLM 决定是否调用工具或回复用户
-        ai_response = bound_model.invoke(messages_for_model)
+        # 4. 调用 LLM 生成文本响应（不使用 bind_tools）
+        ai_response = model.invoke(messages_for_model)
+        ai_content = ai_response.content if hasattr(ai_response, 'content') else str(ai_response)
 
-        # 如果没有工具调用，直接返回 AI 回复
-        if not (hasattr(ai_response, "tool_calls") and ai_response.tool_calls):
+        # 5. 解析文本中的命令
+        tool_name, tool_args, parse_error = parse_text_command(ai_content)
+
+        if parse_error:
+            # JSON 解析错误，返回错误信息
+            return {"messages": [AIMessage(content=ai_content + f"\n\n[系统提示: {parse_error}]")]}
+
+        if tool_name is None:
+            # 没有命令，直接返回 AI 回复
             return {"messages": [ai_response]}
 
-        # 5. 有工具调用：构建 ToolMessage 反馈给 LLM
-        # 添加工具调用和初始 AI 回复
-        messages_with_tools = messages_for_model + [ai_response]
+        # 6. 执行命令
+        result, command_update, command_goto = execute_tool_command(
+            tool_name, tool_args or {}, state, tools
+        )
 
-        for tool_call in ai_response.tool_calls:
-            tool_name = tool_call.get("name") or (tool_call.get("function") or {}).get("name")
-            tool_args = tool_call.get("args") or (tool_call.get("function") or {}).get("arguments", {})
+        # 构建 AI 回复内容
+        response_content = ai_content
+        if result:
+            response_content += f"\n\n{result}"
 
-            # 找到对应工具
-            matched_tool = None
-            for t in tools:
-                if t.name == tool_name:
-                    matched_tool = t
-                    break
-
-            if matched_tool is None:
-                # 未知工具，添加错误消息
-                messages_with_tools.append(
-                    ToolMessage(content=f"未知工具: {tool_name}", tool_call_id=tool_call.get("id", ""))
-                )
-                continue
-
-            # 创建模拟 runtime 以传递 state
-            class MockRuntime:
-                pass
-            mock_runtime = MockRuntime()
-            mock_runtime.state = state
-
-            # 调用工具
-            try:
-                tool_result = matched_tool.func(
-                    runtime=mock_runtime,
-                    **tool_args
-                )
-            except Exception as e:
-                tool_result = f"工具执行错误: {e}"
-
-            # 检查是否返回 Command (ParentCommand)
-            if isinstance(tool_result, Command) and hasattr(tool_result, "goto"):
-                if tool_result.graph == Command.PARENT:
-                    # 跨图跳转：返回跳转指令和 AI 回复
-                    return {
-                        "messages": [ai_response],
-                        **tool_result.update,
-                        "goto": tool_result.goto,
-                    }
-
-            # 添加工具结果到消息历史
-            messages_with_tools.append(
-                ToolMessage(content=str(tool_result), tool_call_id=tool_call.get("id", ""))
-            )
-
-        # 6. 第二轮：让 LLM 根据工具结果生成最终回复
-        try:
-            final_response = bound_model.invoke(messages_with_tools)
-
-            # 检查最终回复是否也有工具调用（某些情况下 LLM 可能会）
-            if hasattr(final_response, "tool_calls") and final_response.tool_calls:
-                # 再次处理工具调用
-                messages_with_final_tools = messages_with_tools + [final_response]
-                for tool_call in final_response.tool_calls:
-                    tool_name = tool_call.get("name") or (tool_call.get("function") or {}).get("name")
-                    tool_args = tool_call.get("args") or (tool_call.get("function") or {}).get("arguments", {})
-
-                    matched_tool = next((t for t in tools if t.name == tool_name), None)
-                    if matched_tool:
-                        try:
-                            tool_result = matched_tool.func(runtime=mock_runtime, **tool_args)
-                            if isinstance(tool_result, Command) and hasattr(tool_result, "goto") and tool_result.graph == Command.PARENT:
-                                return {
-                                    "messages": [ai_response, final_response],
-                                    **tool_result.update,
-                                    "goto": tool_result.goto,
-                                }
-                            messages_with_final_tools.append(
-                                ToolMessage(content=str(tool_result), tool_call_id=tool_call.get("id", ""))
-                            )
-                        except Exception as e:
-                            messages_with_final_tools.append(
-                                ToolMessage(content=f"工具执行错误: {e}", tool_call_id=tool_call.get("id", ""))
-                            )
-
-                # 如果还有工具调用，再调用一次 LLM
-                if hasattr(final_response, "tool_calls") and final_response.tool_calls:
-                    third_response = bound_model.invoke(messages_with_final_tools)
-                    return {"messages": [ai_response, final_response, third_response]}
-
-            return {"messages": [ai_response, final_response]}
-
-        except ParentCommand as e:
-            cmd = e.args[0]
-            return {"messages": [ai_response], **cmd.update, "goto": cmd.goto}
+        # 关键修复：无论有没有 command_goto，都要合并 command_update
+        # 路由现在完全由 current_step 决定，工具执行后的 state 更新必须生效
+        # 同时保留自动加载的 evidence_items
+        final_dict = {"messages": [AIMessage(content=response_content)]}
+        if command_update:
+            final_dict.update(command_update)
+        # 如果 step6 自动加载了 evidence_items，保留它
+        if return_dict.get("evidence_items") and "evidence_items" not in final_dict:
+            final_dict["evidence_items"] = return_dict["evidence_items"]
+        return final_dict
 
     return node
 
@@ -1219,16 +1296,14 @@ def _build_evidence_completeness_node():
 
 def _route_to_next(state: ConsultationState) -> str:
     """
-    路由函数：根据节点返回的 goto 字段决定下一步。
-    如果节点没有返回 goto，默认按线性顺序下一步。
+    路由函数：根据 current_step 决定下一步（唯一真实来源）。
+
+    goto 字段不再用于路由（因为它会跨迭代持久化，导致路由错误）。
+    每次都严格基于 current_step 的当前值决定下一步。
     """
-    goto = state.get("goto")
-    if goto and goto in STEP_NAMES:
-        return goto
-    # 默认线性流程：找当前步骤的下一个
     current = state.get("current_step", 1)
     if current < len(STEP_NAMES):
-        return STEP_NAMES[current]  # current_step 是 1-based，数组是 0-based
+        return STEP_NAMES[current - 1]  # current_step 是 1-based
     return END
 
 
@@ -1258,7 +1333,7 @@ def create_consultation_graph():
     # 边：起点 → step1
     workflow.add_edge(START, STEP_NAMES[0])
 
-    # 条件路由：每个步骤之后根据 goto 字段决定下一步
+    # 条件路由：每个步骤之后根据 current_step 决定下一步
     for step_name in STEP_NAMES:
         workflow.add_conditional_edges(
             step_name,

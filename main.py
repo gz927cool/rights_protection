@@ -6,7 +6,7 @@ FastAPI 聊天接口 - 九步劳动争议咨询系统
 import uuid
 import os
 import base64
-from typing import Optional, AsyncIterator
+from typing import Optional, AsyncIterator, List, Dict
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -83,6 +83,11 @@ class SessionInfo(BaseModel):
     current_step: int
     current_step_name: str
     completed_steps: list
+    case_category: Optional[str] = None
+    evidence_items: Optional[List[Dict]] = None
+    qualification: Optional[Dict] = None
+    document_draft: Optional[Dict] = None
+    risk_assessment: Optional[Dict] = None
 
 
 @app.get("/")
@@ -96,7 +101,7 @@ def root():
 
 @app.get("/sessions/{session_id}")
 def get_session(session_id: str) -> SessionInfo:
-    """查询会话状态"""
+    """查询会话状态（含完整案件数据）"""
     config = {"configurable": {"thread_id": session_id}}
     graph = get_graph()
 
@@ -105,14 +110,29 @@ def get_session(session_id: str) -> SessionInfo:
         if state is None:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        # Support both old (state.configurable) and new (state.values) APIs
+        if hasattr(state, "configurable"):
+            current_step = state.configurable.get("current_step", 1)
+            completed = list(state.configurable.get("completed_steps", []))
+            vals = state.values if hasattr(state, "values") else {}
+        else:
+            vals = dict(state.values) if hasattr(state, "values") else {}
+            current_step = vals.get("current_step", 1)
+            completed = list(vals.get("completed_steps", []))
+
         return SessionInfo(
             session_id=session_id,
-            current_step=state.configurable.get("current_step", 1),
+            current_step=current_step,
             current_step_name=STEP_DISPLAY_NAMES.get(
-                STEP_NAMES[state.configurable.get("current_step", 1) - 1],
-                STEP_NAMES[state.configurable.get("current_step", 1) - 1],
+                STEP_NAMES[current_step - 1],
+                STEP_NAMES[current_step - 1],
             ),
-            completed_steps=list(state.configurable.get("completed_steps", [])),
+            completed_steps=completed,
+            case_category=vals.get("case_category"),
+            evidence_items=vals.get("evidence_items"),
+            qualification=vals.get("qualification"),
+            document_draft=vals.get("document_draft"),
+            risk_assessment=vals.get("risk_assessment"),
         )
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -210,9 +230,9 @@ def post_chat_stream(message: ChatMessage):
 
     def event_generator():
         try:
-            # 用 stream 而非 invoke，收集所有 step chunks
             current_step = 1
-            last_message_count = 0  # Track message count instead of using id()
+            last_message_count = 0
+            prev_step_name = None  # Track step name from previous chunk
 
             for chunk in graph.stream(
                 {
@@ -223,6 +243,10 @@ def post_chat_stream(message: ChatMessage):
             ):
                 # chunk = {"step_name": node_output}
                 for step_name, step_result in chunk.items():
+                    # 如果同一个 step 再次出现，说明它在等待用户输入，停止 stream
+                    if prev_step_name == step_name and prev_step_name is not None:
+                        break
+
                     if isinstance(step_result, dict):
                         messages = step_result.get("messages", [])
 
@@ -244,6 +268,13 @@ def post_chat_stream(message: ChatMessage):
                         # 更新 current_step
                         if "current_step" in step_result:
                             current_step = step_result["current_step"]
+
+                    prev_step_name = step_name
+                else:
+                    # Inner loop completed normally, continue to next chunk
+                    continue
+                # Inner loop broke (same step repeated), break outer loop too
+                break
 
             # 结束事件
             yield f"data: {_json.dumps({'done': True, 'current_step': current_step, 'session_id': session_id})}\n\n"

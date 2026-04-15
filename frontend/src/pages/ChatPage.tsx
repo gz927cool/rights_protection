@@ -1,21 +1,541 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { useParams, Link } from "react-router-dom"
+import DocumentPreview, { DocumentDraft } from "../components/DocumentPreview"
+import EvidenceForm from "../components/EvidenceForm"
+import RoadmapView from "../components/RoadmapView"
+
+// =============================================================================
+// Types
+// =============================================================================
 
 interface Message {
+  id: string
   role: "user" | "assistant"
   content: string
+  streaming?: boolean
+  artifactType?: "rights" | "risk" | "evidence" | "document" | "roadmap" | "form"
+  artifactData?: unknown
 }
 
 interface SessionState {
   current_step: number
   current_step_name: string
   completed_steps: number[]
+  case_category?: string
+  evidence_items?: EvidenceItem[]
+  qualification?: unknown
+  document_draft?: unknown
+  risk_assessment?: unknown
 }
 
+interface EvidenceItem {
+  id: string
+  name: string
+  description: string
+  category: string
+  tier: number
+  status: "" | "A" | "B" | "C"
+  uploaded_file_refs: string[]
+}
+
+interface StreamEvent {
+  content?: string
+  done?: boolean
+  current_step?: number
+  session_id?: string
+  artifact_type?: string
+  artifact_data?: unknown
+}
+
+interface RightsItem {
+  right_name: string
+  amount: number
+  calculation_basis: string
+}
+
+interface RiskItem {
+  level: "high" | "medium" | "low"
+  title: string
+  description: string
+  suggestion: string
+}
+
+// =============================================================================
+// Constants
+// =============================================================================
+
 const STEP_LABELS = [
-  "模式选择", "问题初判", "通用问题", "特殊问题", "案件定性",
-  "证据攻略", "风险提示", "文书生成", "行动路线图", "求助复核",
+  { num: 1, label: "模式选择", icon: "🎯" },
+  { num: 2, label: "问题初判", icon: "📋" },
+  { num: 3, label: "信息补全", icon: "📝" },
+  { num: 4, label: "案件定性", icon: "⚖️" },
+  { num: 5, label: "证据攻略", icon: "📁" },
+  { num: 6, label: "风险提示", icon: "⚠️" },
+  { num: 7, label: "文书生成", icon: "📄" },
+  { num: 8, label: "行动路线图", icon: "🗺️" },
+  { num: 9, label: "求助复核", icon: "🆘" },
 ]
+
+const THEME = {
+  primary: "bg-blue-600",
+  primaryLight: "bg-blue-50",
+  primaryText: "text-blue-700",
+  accent: "bg-emerald-600",
+  accentLight: "bg-emerald-50",
+  accentText: "text-emerald-700",
+  warning: "bg-amber-50",
+  warningText: "text-amber-700",
+  danger: "bg-red-50",
+  dangerText: "text-red-700",
+  surface: "bg-white",
+  surfaceAlt: "bg-gray-50",
+  border: "border-gray-200",
+  textPrimary: "text-gray-800",
+  textSecondary: "text-gray-600",
+  textMuted: "text-gray-400",
+}
+
+// =============================================================================
+// Utility Components
+// =============================================================================
+
+function generateId() {
+  return Math.random().toString(36).substring(2, 9)
+}
+
+function cn(...classes: (string | boolean | undefined)[]) {
+  return classes.filter(Boolean).join(" ")
+}
+
+// =============================================================================
+// Step Indicator Component
+// =============================================================================
+
+function StepIndicator({
+  currentStep,
+  completedSteps,
+  onStepClick,
+}: {
+  currentStep: number
+  completedSteps: number[]
+  onStepClick?: (step: number) => void
+}) {
+  return (
+    <div className="w-full overflow-x-auto py-3 px-4">
+      <div className="flex items-center gap-1 min-w-max">
+        {STEP_LABELS.map((step, idx) => {
+          const isCompleted = completedSteps.includes(step.num)
+          const isCurrent = currentStep === step.num
+          const isClickable = isCompleted || isCurrent
+
+          return (
+            <div key={step.num} className="flex items-center">
+              <button
+                onClick={() => isClickable && onStepClick?.(step.num)}
+                disabled={!isClickable}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-medium transition-all",
+                  isCurrent && "ring-2 ring-blue-400 shadow-sm",
+                  isCompleted && THEME.accentLight + " " + THEME.accentText,
+                  isCurrent && THEME.primaryLight + " " + THEME.primaryText,
+                  !isCompleted && !isCurrent && "bg-gray-100 text-gray-400"
+                )}
+              >
+                <span className="text-base">{step.icon}</span>
+                <span className="hidden sm:inline">{step.label}</span>
+                <span className="sm:hidden">{step.num}</span>
+                {isCompleted && (
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path
+                      fillRule="evenodd"
+                      d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                      clipRule="evenodd"
+                    />
+                  </svg>
+                )}
+              </button>
+              {idx < STEP_LABELS.length - 1 && (
+                <div className="w-4 h-px bg-gray-200 mx-0.5" />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// =============================================================================
+// Streaming Text Component
+// =============================================================================
+
+function StreamingText({ text }: { text: string }) {
+  return (
+    <div className="relative">
+      <pre className="whitespace-pre-wrap text-sm font-sans leading-relaxed">
+        {text}
+        <span className="inline-block w-2 h-4 bg-blue-500 animate-pulse ml-1" />
+      </pre>
+    </div>
+  )
+}
+
+// =============================================================================
+// Rights Summary Table
+// =============================================================================
+
+function RightsSummaryTable({ rights }: { rights: RightsItem[] }) {
+  const total = rights.reduce((sum, r) => sum + (r.amount || 0), 0)
+
+  return (
+    <div className="my-4 rounded-xl border border-gray-200 overflow-hidden">
+      <div className="bg-blue-50 px-4 py-3 border-b border-gray-200">
+        <h4 className="font-semibold text-blue-800 flex items-center gap-2">
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+          </svg>
+          权益清单
+        </h4>
+      </div>
+      <table className="w-full text-sm">
+        <thead className="bg-gray-50">
+          <tr>
+            <th className="px-4 py-2 text-left font-medium text-gray-600">权益项目</th>
+            <th className="px-4 py-2 text-right font-medium text-gray-600">金额</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-gray-100">
+          {rights.map((item, i) => (
+            <tr key={i} className="hover:bg-gray-50">
+              <td className="px-4 py-2 text-gray-700">{item.right_name}</td>
+              <td className="px-4 py-2 text-right font-semibold text-gray-800">
+                ¥{(item.amount || 0).toLocaleString("zh-CN")}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot className="bg-blue-50">
+          <tr>
+            <td className="px-4 py-3 font-bold text-blue-800">合计</td>
+            <td className="px-4 py-3 text-right font-bold text-blue-800 text-lg">
+              ¥{total.toLocaleString("zh-CN")}
+            </td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  )
+}
+
+// =============================================================================
+// Risk Assessment Display
+// =============================================================================
+
+function RiskAssessmentDisplay({ risks }: { risks: RiskItem[] }) {
+  const getRiskStyle = (level: string) => {
+    switch (level) {
+      case "high":
+        return { bg: "bg-red-50", border: "border-red-200", text: "text-red-700", icon: "⚠️" }
+      case "medium":
+        return { bg: "bg-amber-50", border: "border-amber-200", text: "text-amber-700", icon: "⚡" }
+      default:
+        return { bg: "bg-green-50", border: "border-green-200", text: "text-green-700", icon: "✓" }
+    }
+  }
+
+  const highRisks = risks.filter((r) => r.level === "high")
+
+  return (
+    <div className="my-4 space-y-3">
+      <div className="flex items-center gap-2 mb-4">
+        <h4 className="font-semibold text-gray-800 flex items-center gap-2">
+          <svg className="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          风险提示
+        </h4>
+        {highRisks.length > 0 && (
+          <span className="px-2 py-0.5 bg-red-100 text-red-700 text-xs font-medium rounded-full">
+            {highRisks.length} 高风险
+          </span>
+        )}
+      </div>
+
+      {risks.map((risk, i) => {
+        const style = getRiskStyle(risk.level)
+        return (
+          <div
+            key={i}
+            className={cn("rounded-lg border p-4", style.bg, style.border)}
+          >
+            <div className="flex items-start gap-3">
+              <span className="text-xl">{style.icon}</span>
+              <div className="flex-1">
+                <h5 className={cn("font-medium", style.text)}>{risk.title}</h5>
+                <p className="text-sm text-gray-600 mt-1">{risk.description}</p>
+                {risk.suggestion && (
+                  <div className="mt-2 text-sm text-gray-500">
+                    <span className="font-medium">建议：</span>
+                    {risk.suggestion}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+// =============================================================================
+// Quick Action Buttons
+// =============================================================================
+
+function QuickActions({ onSelect }: { onSelect: (action: string) => void }) {
+  const categories = [
+    { label: "欠薪/克扣工资", icon: "💰" },
+    { label: "被辞退/开除", icon: "🚫" },
+    { label: "工伤认定", icon: "🏥" },
+    { label: "调岗降薪", icon: "📉" },
+    { label: "社保欠缴", icon: "🏦" },
+    { label: "其他争议", icon: "❓" },
+  ]
+
+  return (
+    <div className="my-4">
+      <p className="text-xs text-gray-500 mb-2">快捷问题类型：</p>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {categories.map((cat) => (
+          <button
+            key={cat.label}
+            onClick={() => onSelect(`我想咨询${cat.label}问题`)}
+            className="flex items-center gap-2 px-3 py-2 bg-gray-50 hover:bg-gray-100 rounded-lg text-sm text-gray-700 border border-gray-200 transition-colors"
+          >
+            <span>{cat.icon}</span>
+            <span>{cat.label}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// =============================================================================
+// Rich Message Renderer
+// =============================================================================
+
+function parseMessageContent(content: string): {
+  text: string
+  artifactType?: string
+  artifactData?: unknown
+} {
+  // Strip tool command JSON from display (e.g. {"tool":"proceed_to_next_step",...})
+  let cleanContent = content.replace(/\{[^{}]*"tool"\s*:[^{}]*\}/g, "").trim()
+  // Strip any remaining trailing tool JSON blocks
+  cleanContent = cleanContent.replace(/\n\s*\{[^{}]*"[^"]+"\s*:[^}]+\}\s*$/, "").trim()
+
+  if (cleanContent.includes("[RIGHTS_DATA]")) {
+    try {
+      const jsonMatch = cleanContent.match(/\[RIGHTS_DATA\]([\s\S]*?)\[\/RIGHTS_DATA\]/)
+      if (jsonMatch) {
+        const rights = JSON.parse(jsonMatch[1]) as RightsItem[]
+        return {
+          text: cleanContent.replace(/\[RIGHTS_DATA\][\s\S]*?\[\/RIGHTS_DATA\]/, "").trim(),
+          artifactType: "rights",
+          artifactData: rights,
+        }
+      }
+    } catch {}
+  }
+
+  if (cleanContent.includes("[RISK_DATA]")) {
+    try {
+      const jsonMatch = cleanContent.match(/\[RISK_DATA\]([\s\S]*?)\[\/RISK_DATA\]/)
+      if (jsonMatch) {
+        const risks = JSON.parse(jsonMatch[1]) as RiskItem[]
+        return {
+          text: cleanContent.replace(/\[RISK_DATA\][\s\S]*?\[\/RISK_DATA\]/, "").trim(),
+          artifactType: "risk",
+          artifactData: risks,
+        }
+      }
+    } catch {}
+  }
+
+  if (cleanContent.includes("[EVIDENCE_FORM]")) {
+    return {
+      text: cleanContent.replace("[EVIDENCE_FORM]", "").trim(),
+      artifactType: "evidence",
+    }
+  }
+
+  if (cleanContent.includes("[DOCUMENT_PREVIEW]")) {
+    return {
+      text: cleanContent.replace("[DOCUMENT_PREVIEW]", "").trim(),
+      artifactType: "document",
+    }
+  }
+
+  if (cleanContent.includes("[ROADMAP]")) {
+    return {
+      text: cleanContent.replace("[ROADMAP]", "").trim(),
+      artifactType: "roadmap",
+    }
+  }
+
+  return { text: cleanContent }
+}
+
+function RichMessageRenderer({ message, onQuickAction }: { message: Message; onQuickAction?: (text: string) => void }) {
+  const { text, artifactType, artifactData } = parseMessageContent(message.content)
+
+  if (message.role === "user") {
+    return (
+      <div className="max-w-xl rounded-2xl px-4 py-3 bg-blue-600 text-white rounded-br-md">
+        <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Main text content */}
+      {text && (
+        <div className="bg-white border rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
+          {message.streaming ? (
+            <StreamingText text={text} />
+          ) : (
+            <pre className="whitespace-pre-wrap text-sm font-sans leading-relaxed">
+              {text}
+            </pre>
+          )}
+        </div>
+      )}
+
+      {/* Artifact rendering based on type */}
+      {artifactType === "rights" && artifactData !== undefined ? (
+        <RightsSummaryTable rights={artifactData as RightsItem[]} />
+      ) : null}
+
+      {artifactType === "risk" && artifactData !== undefined ? (
+        <RiskAssessmentDisplay risks={artifactData as RiskItem[]} />
+      ) : null}
+
+      {/* Inline quick actions - clicking category buttons sends the text */}
+      {!message.streaming && !artifactType && onQuickAction && text.length > 30 ? (
+        <QuickActions onSelect={onQuickAction} />
+      ) : null}
+    </div>
+  )
+}
+
+// =============================================================================
+// Sidebar Panel Component
+// =============================================================================
+
+type PanelType = "evidence" | "document" | "roadmap" | null
+
+function SidebarPanel({
+  type,
+  sessionId,
+  sessionState,
+  onClose,
+}: {
+  type: PanelType
+  sessionId: string
+  sessionState: SessionState | null
+  onClose: () => void
+}) {
+  if (!type) return null
+
+  const panelConfig = {
+    evidence: {
+      title: "证据收集",
+      icon: "📁",
+      color: "emerald",
+    },
+    document: {
+      title: "文书预览",
+      icon: "📄",
+      color: "blue",
+    },
+    roadmap: {
+      title: "维权路线图",
+      icon: "🗺️",
+      color: "amber",
+    },
+  }
+
+  const config = panelConfig[type]
+
+  return (
+    <div className="fixed inset-y-0 right-0 w-full sm:w-96 bg-white shadow-2xl z-50 flex flex-col animate-slide-in">
+      {/* Header */}
+      <div className={cn("px-4 py-3 border-b flex items-center justify-between", THEME.border)}>
+        <div className="flex items-center gap-2">
+          <span className="text-2xl">{config.icon}</span>
+          <h3 className="font-semibold text-gray-800">{config.title}</h3>
+        </div>
+        <button
+          onClick={onClose}
+          className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          aria-label="关闭"
+        >
+          <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto">
+        {type === "evidence" && (
+          <EvidenceForm
+            sessionId={sessionId}
+            caseCategory={sessionState?.case_category || "劳动争议"}
+            evidenceItems={sessionState?.evidence_items || []}
+            onStatusChange={() => {}}
+          />
+        )}
+        {type === "document" && (
+          <div className="p-4">
+            <DocumentPreview
+              document={sessionState?.document_draft as DocumentDraft | null || null}
+              rightsList={(sessionState?.qualification as { rights_list?: RightsItem[] })?.rights_list || []}
+              onRegenerate={() => {}}
+            />
+          </div>
+        )}
+        {type === "roadmap" && (
+          <RoadmapView caseCategory={sessionState?.case_category || "劳动争议"} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+// =============================================================================
+// Loading Indicator
+// =============================================================================
+
+function LoadingDots() {
+  return (
+    <div className="flex justify-start">
+      <div className="bg-white border rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
+        <div className="flex gap-1">
+          <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+          <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+          <span className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// =============================================================================
+// Main Chat Page
+// =============================================================================
 
 export default function ChatPage() {
   const { sessionId } = useParams()
@@ -24,10 +544,13 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [activePanel, setActivePanel] = useState<PanelType>(null)
+  const [streamingContent, setStreamingContent] = useState("")
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-
-  const currentSessionId = sessionId || "new"
+  const [activeSessionId, setActiveSessionId] = useState(sessionId || "new")
+  const currentSessionId = activeSessionId
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -35,14 +558,15 @@ export default function ChatPage() {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, scrollToBottom])
+  }, [messages, streamingContent, scrollToBottom])
 
   // Fetch session state
   useEffect(() => {
     if (!currentSessionId || currentSessionId === "new") return
+
     fetch(`/sessions/${currentSessionId}`)
-      .then(r => r.json())
-      .then(data => {
+      .then((r) => r.json())
+      .then((data) => {
         if (data && data.current_step) {
           setSessionState(data)
         }
@@ -50,15 +574,26 @@ export default function ChatPage() {
       .catch(() => {})
   }, [currentSessionId])
 
+  const handleQuickSelect = (text: string) => {
+    setInput(text)
+    inputRef.current?.focus()
+  }
+
   const sendMessage = async () => {
     if (!input.trim() || loading) return
 
-    const userMessage: Message = { role: "user", content: input }
-    setMessages(prev => [...prev, userMessage])
+    const userMessage: Message = {
+      id: generateId(),
+      role: "user",
+      content: input,
+    }
+
+    setMessages((prev) => [...prev, userMessage])
     const userInput = input
     setInput("")
     setLoading(true)
     setError(null)
+    setStreamingContent("")
 
     try {
       const res = await fetch("/chat/stream", {
@@ -73,48 +608,90 @@ export default function ChatPage() {
 
       const reader = res.body?.getReader()
       const decoder = new TextDecoder()
-      let fullContent = ""
-      let finalStep = 1
 
       if (reader) {
+        // Create a streaming assistant message
+        const streamingMessageId = generateId()
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: streamingMessageId,
+            role: "assistant",
+            content: "",
+            streaming: true,
+          },
+        ])
+
+        let fullContent = ""
+
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+
           const chunk = decoder.decode(value, { stream: true })
+
           for (const line of chunk.split("\n")) {
             if (!line.startsWith("data: ")) continue
+
             try {
-              const data = JSON.parse(line.slice(6))
+              const data = JSON.parse(line.slice(6)) as StreamEvent
+
               if (data.content) {
                 fullContent += data.content
+                setStreamingContent(fullContent)
+
+                // Update the streaming message
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === streamingMessageId
+                      ? { ...msg, content: fullContent }
+                      : msg
+                  )
+                )
               }
+
+              if (data.artifact_type) {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === streamingMessageId
+                      ? { ...msg, artifactType: data.artifact_type as Message["artifactType"], artifactData: data.artifact_data }
+                      : msg
+                  )
+                )
+              }
+
               if (data.done) {
-                finalStep = data.current_step || finalStep
+                // Mark streaming as complete
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === streamingMessageId
+                      ? { ...msg, streaming: false }
+                      : msg
+                  )
+                )
+
+                // Auto-open panel based on step
+                const step = data.current_step
+                if (step === 5) setActivePanel("evidence")
+                else if (step === 7) setActivePanel("document")
+                else if (step === 8) setActivePanel("roadmap")
               }
-              if (data.session_id && data.session_id !== currentSessionId) {
-                // New session created, redirect
+
+              if (data.session_id && data.session_id !== activeSessionId) {
+                setActiveSessionId(data.session_id)
                 window.history.replaceState(null, "", `/chat/${data.session_id}`)
               }
             } catch (parseErr) {
-              console.error("解析流数据失败:", parseErr, "原始数据:", line)
+              console.error("解析流数据失败:", parseErr)
             }
           }
         }
-
-        // Update messages once after all chunks collected to prevent race conditions
-        setMessages(prev => {
-          const last = prev[prev.length - 1]
-          if (last?.role === "assistant") {
-            return [...prev.slice(0, -1), { ...last, content: fullContent }]
-          }
-          return [...prev, { role: "assistant", content: fullContent }]
-        })
       }
 
-      // Update session state after message
+      // Update session state
       if (currentSessionId !== "new") {
         fetch(`/sessions/${currentSessionId}`)
-          .then(r => r.json())
+          .then((r) => r.json())
           .then(setSessionState)
           .catch((stateErr) => {
             console.error("获取会话状态失败:", stateErr)
@@ -125,168 +702,256 @@ export default function ChatPage() {
       const errorMessage = err instanceof Error ? err.message : "网络连接失败，请检查后端服务是否正常运行"
       setError(errorMessage)
 
-      // Add error message to chat
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        content: `抱歉，发送消息时出现错误：${errorMessage}`
-      }])
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: generateId(),
+          role: "assistant",
+          content: `抱歉，发送消息时出现错误：${errorMessage}`,
+        },
+      ])
     } finally {
       setLoading(false)
+      setStreamingContent("")
       inputRef.current?.focus()
     }
   }
 
+  const currentStep = sessionState?.current_step || 1
+  const completedSteps = sessionState?.completed_steps || []
+
   return (
     <div className="flex flex-col h-screen bg-gray-50">
       {/* Header */}
-      <header className="bg-indigo-600 text-white px-4 py-3 flex items-center justify-between shadow-sm">
-        <div>
-          <h2 className="font-semibold">劳动争议咨询</h2>
-          {sessionState && (
-            <p className="text-xs text-indigo-200">
-              第{sessionState.current_step}步 · {sessionState.current_step_name}
-            </p>
-          )}
+      <header className={cn("px-4 py-3 flex items-center justify-between shadow-sm", THEME.primary)}>
+        <div className="flex items-center gap-3">
+          <Link
+            to="/"
+            className="p-2 hover:bg-blue-700 rounded-lg transition-colors"
+            aria-label="返回首页"
+          >
+            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+          </Link>
+          <div>
+            <h1 className="font-semibold text-white">劳动争议智能咨询</h1>
+            {sessionState && (
+              <p className="text-xs text-blue-200">
+                第{currentStep}步 · {sessionState.current_step_name}
+              </p>
+            )}
+          </div>
         </div>
-        <Link to="/" className="text-sm text-indigo-200 hover:text-white">
-          返回首页
-        </Link>
+
+        <div className="flex items-center gap-2">
+          {/* Panel toggle buttons */}
+          <button
+            onClick={() => setActivePanel(activePanel === "evidence" ? null : "evidence")}
+            className={cn(
+              "p-2 rounded-lg transition-colors",
+              activePanel === "evidence"
+                ? "bg-white text-emerald-600"
+                : "text-white hover:bg-blue-700"
+            )}
+            title="证据收集"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setActivePanel(activePanel === "document" ? null : "document")}
+            className={cn(
+              "p-2 rounded-lg transition-colors",
+              activePanel === "document"
+                ? "bg-white text-blue-600"
+                : "text-white hover:bg-blue-700"
+            )}
+            title="文书预览"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setActivePanel(activePanel === "roadmap" ? null : "roadmap")}
+            className={cn(
+              "p-2 rounded-lg transition-colors",
+              activePanel === "roadmap"
+                ? "bg-white text-amber-600"
+                : "text-white hover:bg-blue-700"
+            )}
+            title="维权路线图"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       {/* Step Progress */}
       {sessionState && (
-        <div className="bg-white border-b px-4 py-2">
-          <div className="flex items-center gap-1 overflow-x-auto">
-            {STEP_LABELS.map((label, i) => {
-              const stepNum = i + 1
-              const isCompleted = sessionState.completed_steps?.includes(stepNum)
-              const isCurrent = sessionState.current_step === stepNum
-              return (
-                <div key={i} className="flex items-center">
-                  <div className={`flex items-center gap-1 px-2 py-1 rounded text-xs whitespace-nowrap ${
-                    isCurrent ? "bg-indigo-100 text-indigo-700 font-medium" :
-                    isCompleted ? "bg-green-100 text-green-700" :
-                    "text-gray-400"
-                  }`}>
-                    <span>{stepNum}</span>
-                    <span>{label}</span>
-                    {isCompleted && <span>✓</span>}
-                  </div>
-                  {i < STEP_LABELS.length - 1 && (
-                    <div className="w-2 h-px bg-gray-300 mx-0.5" />
-                  )}
-                </div>
-              )
-            })}
-          </div>
+        <div className="bg-white border-b border-gray-200">
+          <StepIndicator
+            currentStep={currentStep}
+            completedSteps={completedSteps}
+            onStepClick={(step) => {
+              if (step === 5) setActivePanel("evidence")
+              else if (step === 7) setActivePanel("document")
+              else if (step === 8) setActivePanel("roadmap")
+            }}
+          />
         </div>
       )}
 
       {/* Error Banner */}
       {error && (
-        <div className="bg-red-50 border-l-4 border-red-500 px-4 py-3 mx-4 mt-2">
+        <div className="mx-4 mt-2 bg-red-50 border-l-4 border-red-500 px-4 py-3 rounded-r-lg">
           <div className="flex items-start">
-            <div className="flex-shrink-0">
-              <svg className="h-5 w-5 text-red-500" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
-              </svg>
-            </div>
+            <svg className="w-5 h-5 text-red-500 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+              <path
+                fillRule="evenodd"
+                d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z"
+                clipRule="evenodd"
+              />
+            </svg>
             <div className="ml-3 flex-1">
               <p className="text-sm text-red-700">{error}</p>
             </div>
             <button
               onClick={() => setError(null)}
-              className="ml-3 flex-shrink-0 text-red-500 hover:text-red-700"
+              className="ml-3 shrink-0 text-red-500 hover:text-red-700"
             >
-              <span className="sr-only">关闭</span>
-              <svg className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                <path
+                  fillRule="evenodd"
+                  d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                  clipRule="evenodd"
+                />
               </svg>
             </button>
           </div>
         </div>
       )}
 
-      {/* Messages */}
+      {/* Messages Area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
-          <div className="text-center text-gray-400 mt-20">
-            <div className="text-4xl mb-3">⚖️</div>
-            <p className="font-medium text-gray-600">欢迎使用劳动争议智能咨询系统</p>
-            <p className="text-sm mt-1">请描述您的劳动争议问题，AI助手将引导您完成维权流程</p>
-            <div className="mt-6 text-left max-w-md mx-auto">
-              <p className="text-xs text-gray-400 mb-2">常见问题类型：</p>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                {["欠薪/克扣工资", "被辞退/开除", "工伤认定", "调岗降薪", "社保欠缴", "其他争议"].map(cat => (
+          <div className="text-center text-gray-400 mt-16">
+            <div className="text-5xl mb-4">⚖️</div>
+            <h2 className="text-xl font-medium text-gray-600 mb-2">
+              欢迎使用劳动争议智能咨询系统
+            </h2>
+            <p className="text-sm text-gray-500 mb-8 max-w-md mx-auto">
+              请描述您的劳动争议问题，AI助手将引导您完成从咨询到文书生成的完整维权流程
+            </p>
+
+            <div className="text-left max-w-sm mx-auto">
+              <p className="text-xs text-gray-400 mb-3 font-medium uppercase tracking-wide">
+                常见问题类型
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { label: "欠薪/克扣工资", icon: "💰" },
+                  { label: "被辞退/开除", icon: "🚫" },
+                  { label: "工伤认定", icon: "🏥" },
+                  { label: "调岗降薪", icon: "📉" },
+                  { label: "社保欠缴", icon: "🏦" },
+                  { label: "其他争议", icon: "❓" },
+                ].map((cat) => (
                   <button
-                    key={cat}
-                    onClick={() => setInput(`我想咨询${cat}问题`)}
-                    className="bg-gray-100 hover:bg-gray-200 rounded px-2 py-1 text-gray-600 text-left"
+                    key={cat.label}
+                    onClick={() => handleQuickSelect(`我想咨询${cat.label}问题`)}
+                    className="flex items-center gap-2 bg-white hover:bg-gray-50 rounded-lg px-3 py-2 text-sm text-gray-700 border border-gray-200 shadow-sm transition-all hover:shadow"
                   >
-                    {cat}
+                    <span>{cat.icon}</span>
+                    <span>{cat.label}</span>
                   </button>
                 ))}
               </div>
             </div>
           </div>
         )}
-        {messages.map((msg, i) => (
-          <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-            <div className={`max-w-xl rounded-2xl px-4 py-3 ${
-              msg.role === "user"
-                ? "bg-indigo-600 text-white rounded-br-md"
-                : "bg-white border shadow-sm text-gray-800 rounded-bl-md"
-            }`}>
-              <pre className="whitespace-pre-wrap text-sm font-sans" style={{ fontFamily: "inherit" }}>
-                {msg.content}
-              </pre>
-            </div>
+
+        {messages.map((msg) => (
+          <div
+            key={msg.id}
+            className={cn(
+              "flex",
+              msg.role === "user" ? "justify-end" : "justify-start"
+            )}
+          >
+            <RichMessageRenderer message={msg} onQuickAction={handleQuickSelect} />
           </div>
         ))}
-        {loading && (
-          <div className="flex justify-start">
-            <div className="bg-white border rounded-2xl rounded-bl-md px-4 py-3 text-gray-500">
-              <div className="flex gap-1">
-                <span className="animate-bounce">●</span>
-                <span className="animate-bounce" style={{ animationDelay: "0.2s" }}>●</span>
-                <span className="animate-bounce" style={{ animationDelay: "0.4s" }}>●</span>
-              </div>
-            </div>
-          </div>
-        )}
+
+        {loading && !streamingContent && <LoadingDots />}
+
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input */}
+      {/* Input Area */}
       <div className="border-t bg-white p-4">
         <div className="flex gap-2 items-end max-w-3xl mx-auto">
           <textarea
             ref={inputRef}
             value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => {
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault()
                 sendMessage()
               }
             }}
-            placeholder="输入您的劳动争议问题..."
+            placeholder="描述您的劳动争议问题..."
             rows={1}
-            className="flex-1 border border-gray-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+            className="flex-1 border border-gray-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none text-sm"
             style={{ maxHeight: "120px" }}
           />
           <button
             onClick={sendMessage}
             disabled={loading || !input.trim()}
-            className="px-6 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 font-medium transition-colors"
+            className={cn(
+              "px-5 py-3 rounded-xl font-medium transition-all",
+              loading || !input.trim()
+                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
+                : "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+            )}
           >
-            发送
+            {loading ? (
+              <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+              </svg>
+            ) : (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+              </svg>
+            )}
           </button>
         </div>
         <p className="text-xs text-gray-400 text-center mt-2">
           按 Enter 发送，Shift+Enter 换行
         </p>
       </div>
+
+      {/* Sidebar Panel */}
+      <SidebarPanel
+        type={activePanel}
+        sessionId={currentSessionId}
+        sessionState={sessionState}
+        onClose={() => setActivePanel(null)}
+      />
+
+      {/* Panel overlay for mobile */}
+      {activePanel && (
+        <div
+          className="fixed inset-0 bg-black/30 z-40 sm:hidden"
+          onClick={() => setActivePanel(null)}
+        />
+      )}
     </div>
   )
 }

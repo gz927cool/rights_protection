@@ -16,3 +16,4 @@ CAPABILITIES_template.md
 frontend/node_modules
 .playwright-mcp
 *.png
+.claude/skills/playwright-cli/*
