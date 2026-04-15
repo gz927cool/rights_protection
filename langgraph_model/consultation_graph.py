@@ -119,11 +119,13 @@ STEP_PROMPTS: Dict[str, str] = {
 - 适用场景：一般性劳动争议、有充足时间系统梳理
 - 优势：随时暂停保存、9步完整覆盖
 
-## 引导话术要求
-1. 友好地介绍系统
-2. 说明两种模式的特点
-3. 引导用户明确选择
-4. 不催促，尊重用户节奏
+## 回复格式要求（非常重要）
+你必须生成包含【文本回复】的消息！格式为：
+1. 第一部分：用自然语言向用户介绍两种模式（这是给用户看的）
+2. 第二部分：工具调用（包含 route 参数）
+
+注意：如果用户已经明确表达了选择（如"我想用AI"），你仍然需要用自然语言确认收到用户的选择，
+然后调用 proceed_to_next_step 工具。
 
 ## 结束条件
 用户明确选择后，调用 proceed_to_next_step，携带：
@@ -1035,38 +1037,20 @@ def request_lawyer_help(runtime: ToolRuntime) -> str:
 
 
 # ============================================================================
-# Step Agent 创建（恢复 create_agent 模式，兼容已验证的架构）
-# ============================================================================
-
-def _create_step_agent(step_name: str):
-    """为指定步骤创建一个 agent（使用 create_agent）"""
-    from langchain.agents import create_agent as _create_agent
-    tools = get_step_tools(step_name)
-    # 动态 prompt 构建：build_step_system_prompt 会在 node 调用时实时拼接
-    return _create_agent(
-        model,
-        tools=tools,
-        system_prompt="",  # prompt 在 node 中动态注入
-    )
-
-
-STEP_AGENTS: Dict[str, Any] = {
-    name: _create_step_agent(name) for name in STEP_NAMES
-}
-
-
-# ============================================================================
-# Step Node 构建（动态上下文注入）
+# Step Node 构建（使用 ToolExecutor 模式处理工具调用）
 # ============================================================================
 
 def _build_step_node(step_name: str):
     """
     为指定步骤构建一个 node 函数。
-    关键设计：动态上下文注入 = GLOBAL + STEP_PROMPT + STATE_DATA
+    直接用 model.invoke() + 手动工具执行，保留 LLM 回复和工具调用。
     """
     from langgraph.errors import ParentCommand
+    from langchain_core.messages import ToolMessage
 
-    agent = STEP_AGENTS[step_name]
+    tools = get_step_tools(step_name)
+    # 绑定工具，auto 模式让 LLM 决定是否调用
+    bound_model = model.bind_tools(tools, tool_choice="auto")
 
     def node(state: ConsultationState) -> Dict:
         # 1. 动态构建带完整上下文的 system prompt
@@ -1077,21 +1061,110 @@ def _build_step_node(step_name: str):
         if not all_messages:
             return {"messages": []}
 
-        # 3. 构造 create_agent 输入：{"messages": [SystemMessage(prompt) + history]}
-        messages_to_agent = [
+        # 3. 构造消息历史：SystemMessage(prompt) + 用户消息
+        messages_for_model = [
             SystemMessage(content=system_prompt),
         ] + all_messages
 
-        # 4. 调用 agent，捕获 ParentCommand（工具返回的跨图跳转指令）
-        try:
-            result = agent.invoke({"messages": messages_to_agent})
-        except ParentCommand as e:
-            # 工具返回 Command(goto=..., graph=Command.PARENT)，直接转发
-            cmd = e.args[0]
-            result = {"messages": [], **cmd.update, "goto": cmd.goto}
-            return result
+        # 4. 第一轮：LLM 决定是否调用工具或回复用户
+        ai_response = bound_model.invoke(messages_for_model)
 
-        return result
+        # 如果没有工具调用，直接返回 AI 回复
+        if not (hasattr(ai_response, "tool_calls") and ai_response.tool_calls):
+            return {"messages": [ai_response]}
+
+        # 5. 有工具调用：构建 ToolMessage 反馈给 LLM
+        # 添加工具调用和初始 AI 回复
+        messages_with_tools = messages_for_model + [ai_response]
+
+        for tool_call in ai_response.tool_calls:
+            tool_name = tool_call.get("name") or (tool_call.get("function") or {}).get("name")
+            tool_args = tool_call.get("args") or (tool_call.get("function") or {}).get("arguments", {})
+
+            # 找到对应工具
+            matched_tool = None
+            for t in tools:
+                if t.name == tool_name:
+                    matched_tool = t
+                    break
+
+            if matched_tool is None:
+                # 未知工具，添加错误消息
+                messages_with_tools.append(
+                    ToolMessage(content=f"未知工具: {tool_name}", tool_call_id=tool_call.get("id", ""))
+                )
+                continue
+
+            # 创建模拟 runtime 以传递 state
+            class MockRuntime:
+                pass
+            mock_runtime = MockRuntime()
+            mock_runtime.state = state
+
+            # 调用工具
+            try:
+                tool_result = matched_tool.func(
+                    runtime=mock_runtime,
+                    **tool_args
+                )
+            except Exception as e:
+                tool_result = f"工具执行错误: {e}"
+
+            # 检查是否返回 Command (ParentCommand)
+            if isinstance(tool_result, Command) and hasattr(tool_result, "goto"):
+                if tool_result.graph == Command.PARENT:
+                    # 跨图跳转：返回跳转指令和 AI 回复
+                    return {
+                        "messages": [ai_response],
+                        **tool_result.update,
+                        "goto": tool_result.goto,
+                    }
+
+            # 添加工具结果到消息历史
+            messages_with_tools.append(
+                ToolMessage(content=str(tool_result), tool_call_id=tool_call.get("id", ""))
+            )
+
+        # 6. 第二轮：让 LLM 根据工具结果生成最终回复
+        try:
+            final_response = bound_model.invoke(messages_with_tools)
+
+            # 检查最终回复是否也有工具调用（某些情况下 LLM 可能会）
+            if hasattr(final_response, "tool_calls") and final_response.tool_calls:
+                # 再次处理工具调用
+                messages_with_final_tools = messages_with_tools + [final_response]
+                for tool_call in final_response.tool_calls:
+                    tool_name = tool_call.get("name") or (tool_call.get("function") or {}).get("name")
+                    tool_args = tool_call.get("args") or (tool_call.get("function") or {}).get("arguments", {})
+
+                    matched_tool = next((t for t in tools if t.name == tool_name), None)
+                    if matched_tool:
+                        try:
+                            tool_result = matched_tool.func(runtime=mock_runtime, **tool_args)
+                            if isinstance(tool_result, Command) and hasattr(tool_result, "goto") and tool_result.graph == Command.PARENT:
+                                return {
+                                    "messages": [ai_response, final_response],
+                                    **tool_result.update,
+                                    "goto": tool_result.goto,
+                                }
+                            messages_with_final_tools.append(
+                                ToolMessage(content=str(tool_result), tool_call_id=tool_call.get("id", ""))
+                            )
+                        except Exception as e:
+                            messages_with_final_tools.append(
+                                ToolMessage(content=f"工具执行错误: {e}", tool_call_id=tool_call.get("id", ""))
+                            )
+
+                # 如果还有工具调用，再调用一次 LLM
+                if hasattr(final_response, "tool_calls") and final_response.tool_calls:
+                    third_response = bound_model.invoke(messages_with_final_tools)
+                    return {"messages": [ai_response, final_response, third_response]}
+
+            return {"messages": [ai_response, final_response]}
+
+        except ParentCommand as e:
+            cmd = e.args[0]
+            return {"messages": [ai_response], **cmd.update, "goto": cmd.goto}
 
     return node
 
@@ -1141,6 +1214,25 @@ def _build_evidence_completeness_node():
 
 
 # ============================================================================
+# 路由函数：读取节点返回的 goto 字段决定下一步
+# ============================================================================
+
+def _route_to_next(state: ConsultationState) -> str:
+    """
+    路由函数：根据节点返回的 goto 字段决定下一步。
+    如果节点没有返回 goto，默认按线性顺序下一步。
+    """
+    goto = state.get("goto")
+    if goto and goto in STEP_NAMES:
+        return goto
+    # 默认线性流程：找当前步骤的下一个
+    current = state.get("current_step", 1)
+    if current < len(STEP_NAMES):
+        return STEP_NAMES[current]  # current_step 是 1-based，数组是 0-based
+    return END
+
+
+# ============================================================================
 # StateGraph 构建
 # ============================================================================
 
@@ -1163,11 +1255,19 @@ def create_consultation_graph():
     for step_name in STEP_NAMES:
         workflow.add_node(step_name, _build_step_node(step_name))
 
-    # 边：线性流程
+    # 边：起点 → step1
     workflow.add_edge(START, STEP_NAMES[0])
-    for i in range(len(STEP_NAMES) - 1):
-        workflow.add_edge(STEP_NAMES[i], STEP_NAMES[i + 1])
-    workflow.add_edge(STEP_NAMES[-1], END)
+
+    # 条件路由：每个步骤之后根据 goto 字段决定下一步
+    for step_name in STEP_NAMES:
+        workflow.add_conditional_edges(
+            step_name,
+            _route_to_next,
+            {
+                **{name: name for name in STEP_NAMES},
+                END: END,
+            },
+        )
 
     checkpointer = InMemorySaver()
     return workflow.compile(checkpointer=checkpointer)

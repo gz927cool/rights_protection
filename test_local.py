@@ -1,192 +1,280 @@
+"""
+九步劳动争议咨询系统 - 本地测试脚本
+
+用于测试新的九步咨询流程，通过 graph.stream() 直接验证工作流。
+
+测试模式：
+1. 单步测试：测试单个步骤的 prompt 和工具
+2. 完整流程测试：模拟用户选择"AI智能问答"后一路到底
+3. 交互式测试：手动输入多轮对话
+"""
 import json
-from langchain_core.messages import HumanMessage
-from langchain_core.messages import BaseMessage,convert_to_openai_messages
-from langgraph_model.legal_assistant import graph 
-from langgraph_model.legal_workflow import create_extractor_graph, create_summarizer_graph
+from langchain_core.messages import HumanMessage, BaseMessage, SystemMessage
 
-extractor_graph = create_extractor_graph()
-summarizer_graph = create_summarizer_graph()
-config = {
-    "configurable": {
-        "thread_id": "114"
-    },
-    "recursion_limit": 3000
-}
-# STREAM_MODE =  "update"
-STREAM_MODE = "values"
-# STREAM_MODE = "messages"
+from langgraph.types import Command
+from langgraph_model.consultation_graph import (
+    get_consultation_graph,
+    STEP_NAMES,
+    build_step_system_prompt,
+    _build_step_node,
+)
+from langgraph_model.consultation_state import create_initial_state
 
-## 初次请求
-request = {
-        "history_list": [],
-        "query": "你好，我想咨询一下，我孩子去游乐场玩，玩碰碰车时候孩子手腕骨折，游乐场应该承担什么责任？",
-        "thread_id": "114"
+# ============================================================================
+# 测试配置
+# ============================================================================
+
+THREAD_ID = "test-local-001"
+
+
+# ============================================================================
+# 测试用例
+# ============================================================================
+
+
+def test_step1_selector_direct():
+    """直接测试 step1_selector 节点"""
+    print("=" * 70)
+    print("测试: step1_selector 直接调用")
+    print("=" * 70)
+
+    node = _build_step_node("step1_selector")
+    initial = create_initial_state(session_id=THREAD_ID)
+
+    # 模拟用户选择 AI 咨询
+    state = {
+        **initial,
+        "messages": [HumanMessage(content="我想用AI智能问答")],
     }
-# request = {
-#         "history_list": [],
-#         "query": "我在工厂上班时手被机器压伤了，现在医生说情况挺严重的。我一个月工资才三千多，现在不能上班了，家里老人孩子都指着我呢。厂里说给我报了工伤，但是后续的治疗费、误工费这些到底怎么算，我完全搞不明白。请问按照规定应该怎么赔偿？",
-#         "thread_id": "114"
-#     }
 
-# request ={
-#     "query": "我的情况符合情景1",
-#     "history_list": [
-#         {
-#             "role": "user",
-#             "content": "我想离婚，但是对方不同意，还威胁我，孩子才3岁，我该怎么办?"
-#         },
-#         {
-#             "role": "assistant",
-#             "content": "根据《中华人民共和国民法典》第一千零七十九条的规定，夫妻一方要求离婚的，可以向人民法院提起离婚诉讼。法院会根据夫妻感情是否确已破裂进行判决。对于您提到的威胁行为，您可以收集相关证据，例如录音、短信等，并向公安机关报案，以保障自身安全。\n\n关于孩子的抚养权问题，法院会根据有利于孩子成长的原则进行判决，通常会考虑双方的经济能力、生活环境以及对孩子的照顾能力等因素。根据《民法典》第一千零八十四条，离婚后，父母对子女仍有抚养、教育、保护的权利和义务。\n\n建议您在处理离婚及抚养权问题时，寻求专业律师的帮助，以便更好地维护您的合法权益。"
-#         },
-#         {
-#             "role": "assistant",
-#             "content": "[\n    {\"name\":\"情形1：对方有家暴行为，您有相关证据（如伤情照片、医院诊断、报警记录等）\", \n    \"description\":\"在离婚诉讼中，家暴是法定离婚事由，法院通常会判决离婚。这种情况下，您不仅可以提起离婚诉讼，还可以： 1. 申请人身安全保护令，禁止对方接近您和孩子 2. 要求精神损害赔偿\", \n    \"advice\":\"立即申请人身保护令，同时准备离婚诉讼\"},\n    \n    {\"name\":\"情形2：对方不同意离婚并威胁您，但没有家暴证据\", \n    \"description\":\"在这种情况下，您可以收集对方威胁的证据（如录音、短信等），并向法院提起离婚诉讼。法院会根据夫妻感情是否确已破裂进行判决。您也可以向公安机关报案，以保障自身安全。\", \n    \"advice\":\"收集威胁证据，向法院提起离婚诉讼，并向公安机关报案\"},\n    \n    {\"name\":\"情形3：对方不同意离婚，且孩子抚养权存在争议\", \n    \"description\":\"法院会根据有利于孩子成长的原则进行判决，通常会考虑双方的经济能力、生活环境以及对孩子的照顾能力等因素。您可以准备相关证据证明您更适合抚养孩子，例如收入证明、居住环境照片、对孩子的照顾记录等。\", \n    \"advice\":\"准备抚养权相关证据，向法院提起离婚诉讼\"}\n]"
-#         }
-#     ],
-#     "thread_id": "thread_123"
-# }
+    result = node(state)
+    print(f"节点返回: {len(result.get('messages', []))} 条消息")
+
+    for msg in result.get("messages", []):
+        if hasattr(msg, "content") and msg.content:
+            content = msg.content[:300]
+            print(f"[AI] {content}...")
+            # 检查是否调用了工具
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                print(f"  工具调用: {[tc['name'] for tc in msg.tool_calls]}")
+
+    print(f"goto 字段: {result.get('goto', '无')}")
+    return result
 
 
-inputs = []
-# 添加历史消息
-for msg in request['history_list']:
-        inputs.append({
-            "role": msg["role"],
-            "content": msg["content"]
-        })
-    
-# 添加当前用户输入
-inputs.append({
-    "role": "user",
-    "content": request['query']
-})
-langchain_messages = []
-from langchain_core.messages import AIMessage,HumanMessage
-for msg in inputs:
-    if msg['role'] == 'assistant':
-        langchain_messages.append(AIMessage(content=msg['content']))
-    elif msg['role'] == 'user':
-        langchain_messages.append(HumanMessage(content=msg['content']))
-# 创建配置，使用传入的thread_id
-config = {
-    "configurable": {
-        "thread_id": request['thread_id']
-    },
-    "recursion_limit": 3000
-}
-json_buffer = ''
-for namespace, event in graph.stream(
-    {"messages": langchain_messages},
-    config=config,
-    subgraphs=True,
-    stream_mode=STREAM_MODE,
-    debug=False
-):
-    if STREAM_MODE == 'values':
-        msg = event['messages'][-1]
-        content = msg.content if isinstance(msg, BaseMessage) else msg['content']
-        
-        sse_data = {
-            "type": "content",
-            "data": content
+def test_step2_initial_direct():
+    """直接测试 step2_initial 节点"""
+    print("=" * 70)
+    print("测试: step2_initial 直接调用")
+    print("=" * 70)
+
+    node = _build_step_node("step2_initial")
+    initial = create_initial_state(session_id=THREAD_ID)
+
+    # step1 已经完成，用户选择案情描述
+    state = {
+        **initial,
+        "current_step": 2,
+        "messages": [
+            HumanMessage(content="我想用AI智能问答"),
+            HumanMessage(content="公司拖欠工资两个月了，我想维权"),
+        ],
+    }
+
+    result = node(state)
+    print(f"节点返回: {len(result.get('messages', []))} 条消息")
+
+    for msg in result.get("messages", []):
+        if hasattr(msg, "content") and msg.content:
+            content = msg.content[:300]
+            print(f"[AI] {content}...")
+
+    print(f"goto 字段: {result.get('goto', '无')}")
+    return result
+
+
+def test_full_flow_with_auto_route():
+    """测试完整流程：模拟用户一路选择默认选项直到结束"""
+    print("=" * 70)
+    print("测试: 完整流程（自动路由模式）")
+    print("=" * 70)
+
+    graph = get_consultation_graph()
+    config = {
+        "configurable": {"thread_id": THREAD_ID},
+        "recursion_limit": 50,
+    }
+
+    # 模拟用户一路回复默认选项
+    # 实际上我们需要多轮输入，每轮用户回答后才会调用 proceed_to_next_step
+    # 这里我们模拟第一轮输入
+
+    messages = [
+        HumanMessage(content="我想用AI智能问答"),  # step1 选择
+    ]
+
+    # 手动循环执行每一步
+    current_step = 1
+    max_iterations = 20
+
+    for i in range(max_iterations):
+        print(f"\n--- 迭代 {i + 1}: 当前步骤 {current_step} ---")
+
+        if current_step > len(STEP_NAMES):
+            print("流程结束")
+            break
+
+        step_name = STEP_NAMES[current_step - 1]
+        node = _build_step_node(step_name)
+
+        # 构造状态
+        state = {
+            "messages": messages,
+            "current_step": current_step,
+            "completed_steps": set(range(1, current_step)),
+            "step_data": {},
+            "dirty_steps": set(),
+            "case_category": None,
+            "session_id": THREAD_ID,
         }
-        print( f"data: {json.dumps(sse_data, ensure_ascii=False)}\n\n")
-        
-    elif STREAM_MODE == 'messages':
-        msg_chunk, meta_data = event
 
-        if msg_chunk.name is not None:
-            continue
-        name = meta_data['langgraph_node']
+        # 调用节点
+        result = node(state)
 
-        if name == 'process_selection'  and meta_data.get('ls_model_name') is not None:
-            continue   ##### 过滤掉监督者节点模型选择的消息
+        # 提取 AI 消息
+        ai_messages = [m for m in result.get("messages", []) if hasattr(m, "type") and m.type == "ai"]
+        if ai_messages:
+            last_ai = ai_messages[-1]
+            content = getattr(last_ai, "content", "")[:200]
+            print(f"[{step_name}] AI: {content}...")
 
-        if name in ['detailer','advisor']:
-            json_buffer += msg_chunk.content
-            try:
-                json_data = json.loads(json_buffer)
-                # print(json_data)
-                json_buffer = ''
-                sse_data = {
-                    "type": "json",
-                    "data": {'content':json_data,
-                            "additional_kwargs": {},
-                            "response_metadata": {},
-                            "type": "AIMessageChunk",
-                            "name": name}
-                }
-            except json.JSONDecodeError:
-                continue
+            # 检查工具调用
+            tool_calls = getattr(last_ai, "tool_calls", []) or []
+            if tool_calls:
+                print(f"  工具调用: {[tc.get('name') or tc.get('function', {}).get('name') for tc in tool_calls]}")
+
+            messages.append(last_ai)
         else:
-            sse_data = {
-                "type": "chunk",
-                "data": msg_chunk.model_dump()
-            }
-            sse_data["data"]["name"] = name
+            print(f"[{step_name}] 无 AI 消息返回")
 
-        print(f"data: {json.dumps(sse_data, ensure_ascii=False)}\n\n")
-        
-    print("=========================================================================")
+        # 检查 goto
+        goto = result.get("goto")
+        if goto:
+            if goto == END:
+                print("流程结束 (goto=END)")
+                break
+            # 找到下一个步骤
+            if goto in STEP_NAMES:
+                current_step = STEP_NAMES.index(goto) + 1
+                print(f"跳转到步骤: {goto} (step {current_step})")
+            else:
+                print(f"未知 goto: {goto}")
+                break
+        else:
+            # 没有 goto，检查 current_step 是否变化
+            new_step = result.get("current_step", current_step)
+            if new_step != current_step:
+                current_step = new_step
+                print(f"步骤推进到: {current_step}")
+            else:
+                # 没有进展，可能是等待用户输入
+                print("等待用户输入...")
+                # 模拟用户输入继续
+                user_input = _get_default_user_input(current_step, messages)
+                if user_input:
+                    messages.append(HumanMessage(content=user_input))
+                    print(f"[用户] {user_input}")
+                else:
+                    print("无法自动生成用户输入，停止")
+                    break
 
-print("完成！")
+    print("\n完成！")
 
 
+def _get_default_user_input(step: int, messages: list) -> str:
+    """根据当前步骤获取默认用户输入"""
+    # 简化版本：直接跳过复杂流程
+    defaults = {
+        1: "我想用AI智能问答",
+        2: "欠薪",  # 用户选择案由
+        3: "在职",  # Q1: 就业状态
+        4: "继续",  # 跳过剩余问题
+        5: "继续",  # 跳过特殊问题
+        6: "继续",  # 跳过证据
+        7: "继续",  # 跳过风险评估
+        8: "继续",  # 跳过文书
+        9: "继续",  # 跳过路线图
+        10: "完成",
+    }
+    return defaults.get(step, "继续")
 
 
-# for namespace, event in graph.stream(
-#     {"messages": langchain_messages},
-#     config=config,
-#     subgraphs=True,
-#     stream_mode=STREAM_MODE,
-#     debug=False
-# ):
-#     if STREAM_MODE == 'values':
-#         msg = event['messages'][-1]
-#         content = msg.content if isinstance(msg, BaseMessage) else msg['content']
-        
-#         sse_data = {
-#             "type": "content",
-#             "data": content
-#         }
-#         print( f"data: {json.dumps(sse_data, ensure_ascii=False)}\n\n")
-        
-#     elif STREAM_MODE == 'messages':
-#         msg_chunk, meta_data = event
+def test_stream_single_turn():
+    """测试 graph.stream() 单轮执行（展示工作流行为）"""
+    print("=" * 70)
+    print("测试: graph.stream() 单轮执行")
+    print("=" * 70)
 
-#         if msg_chunk.name is not None:
-#             continue
-#         name = meta_data['langgraph_node']
+    graph = get_consultation_graph()
+    config = {
+        "configurable": {"thread_id": THREAD_ID},
+        "recursion_limit": 30,
+    }
 
-#         if name == 'process_selection'  and meta_data.get('ls_model_name') is not None:
-#             continue   ##### 过滤掉监督者节点模型选择的消息
+    initial = create_initial_state(session_id=THREAD_ID)
 
-#         if name in ['detailer','advisor']:
-#             json_buffer += msg_chunk.content
-#             try:
-#                 json_data = json.loads(json_buffer)
-#                 # print(json_data)
-#                 json_buffer = ''
-#                 sse_data = {
-#                     "type": "json",
-#                     "data": {'content':json_data,
-#                             "additional_kwargs": {},
-#                             "response_metadata": {},
-#                             "type": "AIMessageChunk",
-#                             "name": name}
-#                 }
-#             except json.JSONDecodeError:
-#                 continue
-#         else:
-#             sse_data = {
-#                 "type": "chunk",
-#                 "data": msg_chunk.model_dump()
-#             }
-#             sse_data["data"]["name"] = name
+    print(f"初始状态: step={initial['current_step']}")
 
-#         print(f"data: {json.dumps(sse_data, ensure_ascii=False)}\n\n")
-        
-#     print("=========================================================================")
+    all_chunks = []
+    try:
+        for i, chunk in enumerate(graph.stream(
+            {
+                **initial,
+                "messages": [HumanMessage(content="我想用AI智能问答")],
+            },
+            config=config,
+        )):
+            all_chunks.append(chunk)
+            for step_name, result in chunk.items():
+                print(f"Chunk {i}: {step_name}")
+                if isinstance(result, dict):
+                    if "goto" in result:
+                        print(f"  goto: {result['goto']}")
+                    msgs = result.get("messages", [])
+                    print(f"  messages: {len(msgs)}")
+                    for msg in msgs:
+                        if hasattr(msg, "content") and msg.content:
+                            print(f"    [{type(msg).__name__}] {msg.content[:100]}...")
 
-# print("完成！")
+        print(f"\n总 chunk 数: {len(all_chunks)}")
+
+    except Exception as e:
+        print(f"错误: {e}")
+
+
+# ============================================================================
+# 主入口
+# ============================================================================
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1:
+        test_name = sys.argv[1]
+        if test_name == "step1":
+            test_step1_selector_direct()
+        elif test_name == "step2":
+            test_step2_initial_direct()
+        elif test_name == "stream":
+            test_stream_single_turn()
+        elif test_name == "full":
+            test_full_flow_with_auto_route()
+        else:
+            print(f"未知测试: {test_name}")
+    else:
+        # 运行所有测试
+        test_step1_selector_direct()
+        print("\n\n")
+        test_step2_initial_direct()
+        print("\n\n")
+        test_stream_single_turn()
