@@ -1,5 +1,6 @@
 .vscode
 .specstory
+.omc
 *.pyc
 /test/*
 .env
@@ -12,3 +13,6 @@ frontend-master
 .env
 .env
 CAPABILITIES_template.md
+frontend/node_modules
+.playwright-mcp
+*.png

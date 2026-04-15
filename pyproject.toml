@@ -1,16 +1,38 @@
 [project]
 name = "legal-assistant-project"
 version = "0.1.0"
-description = "Add your description here"
+description = "劳动争议智能咨询系统 - 九步引导式维权助手"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.135.1",
+    "uvicorn>=0.41.0",
     "json-repair>=0.58.4",
     "langchain>=1.2.10",
     "langchain-openai>=1.1.10",
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
     "pandas>=3.0.1",
     "python-dotenv>=1.2.2",
     "tabulate>=0.10.0",
-    "uvicorn>=0.41.0",
+    "playwright>=1.40.0",
+    "python-multipart>=0.0.9",
+    "aiofiles>=24.0.0",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
