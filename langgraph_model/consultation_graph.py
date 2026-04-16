@@ -1024,26 +1024,31 @@ def _build_step_node(step_name: str):
                 route_raw = user_msgs[-1].content.strip().upper()
                 case_map = {"欠薪": "欠薪", "开除": "开除", "工伤": "工伤",
                             "调岗": "调岗", "社保": "社保", "其他": "其他"}
-                case_category = case_map.get(case_raw, case_raw)
-                route_map = {"B": "self_describe", "2": "self_describe",
-                             "C": "interactive", "3": "interactive",
-                             "A": "video_call", "1": "video_call"}
-                route = route_map.get(route_raw)
-                step_answers = {"case_category": case_category}
-                if route:
-                    step_answers["route"] = route
-                updates: Dict[str, Any] = {
-                    "case_category": "__VIDEO_CALL__" if route == "video_call" else case_category,
-                    "current_step": 3,
-                    "completed_steps": {1, 2},
-                    "step_data": {"step2_initial": StepData(answers=step_answers, status="completed",
-                                                             completed_at=datetime.now().isoformat())},
-                    "dirty_steps": set(),
-                    "last_updated": datetime.now().isoformat(),
-                }
-                final_dict: Dict[str, Any] = {"messages": all_messages}
-                final_dict.update(return_dict)
-                return Command(goto="step3_common", update=updates)
+                # 只有在case_raw是已知案由时才触发auto_skip，避免把无意义输入当案由
+                if case_raw not in case_map:
+                    # 不是有效案由，不触发auto_skip，让LLM继续处理
+                    pass
+                else:
+                    case_category = case_map[case_raw]
+                    route_map = {"B": "self_describe", "2": "self_describe",
+                                 "C": "interactive", "3": "interactive",
+                                 "A": "video_call", "1": "video_call"}
+                    route = route_map.get(route_raw)
+                    step_answers = {"case_category": case_category}
+                    if route:
+                        step_answers["route"] = route
+                    updates: Dict[str, Any] = {
+                        "case_category": "__VIDEO_CALL__" if route == "video_call" else case_category,
+                        "current_step": 3,
+                        "completed_steps": {1, 2},
+                        "step_data": {"step2_initial": StepData(answers=step_answers, status="completed",
+                                                                 completed_at=datetime.now().isoformat())},
+                        "dirty_steps": set(),
+                        "last_updated": datetime.now().isoformat(),
+                    }
+                    final_dict: Dict[str, Any] = {"messages": all_messages}
+                    final_dict.update(return_dict)
+                    return Command(goto="step3_common", update=updates)
 
         if step_name in ("step3_common", "step4_special") and not tool_calls and last_msg_type == "ai":
             user_msgs = [m for m in all_messages if hasattr(m, "type") and m.type in ("human", "user")]
