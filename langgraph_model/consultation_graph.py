@@ -449,6 +449,7 @@ def proceed_to_next_step(
     step_answers: Dict[str, Any] = {},
     extra_data: Optional[Any] = None,
     qualification: Optional[Dict[str, Any]] = None,
+    **kwargs,
 ) -> Command:
     """
     当前步骤完成，携带数据进入下一步。
@@ -762,7 +763,6 @@ STEP_TOOL_SETS: Dict[str, List[Any]] = {
     ],
     "step4_special": [
         proceed_to_next_step,
-        request_missing_info,
         back_to_previous_step,
     ],
     "step5_qualification": [
@@ -928,7 +928,12 @@ def _build_step_node(step_name: str):
     """
     tools = STEP_TOOL_SETS.get(step_name, STEP_TOOL_SETS["step2_initial"])
     tools_by_name = {t.name: t for t in tools}
-    bound_model = model.bind_tools(tools)
+    # Force tool calling: model must invoke a tool on every call
+    # "any" = model will always call at least one tool (preferred for navigation steps)
+    # For step3_common, step4_special, step5_qualification this is critical
+    force_tool_steps = {"step2_initial", "step3_common", "step4_special", "step5_qualification"}
+    tool_choice = "any" if step_name in force_tool_steps else None
+    bound_model = model.bind_tools(tools, tool_choice=tool_choice)
 
     def node(state: ConsultationState) -> Dict:
         # 交互模式：检查是否从 interrupt 恢复（用户已输入新消息）
@@ -1005,7 +1010,68 @@ def _build_step_node(step_name: str):
                     )
                     all_messages.append(tool_msg)
 
-        # 6. 无导航工具调用 → 返回普通字典，让条件边决定路由
+        # 6. 无导航工具调用 → 检查是否需要自动跳过
+        # step2_initial: 用户输入案由+路由选择后，LLM 只生成文字不调用工具
+        #   → 解析案由和路由，直接跳到 step3_common
+        # step3_common/step4_special: 用户输入后 LLM 只生成文字（无工具调用）
+        #   → 自动跳下一步（保留已收集的信息）
+        last_msg_type = all_messages[-1].type if all_messages else None
+        if step_name == "step2_initial" and not tool_calls and last_msg_type == "ai":
+            user_msgs = [m for m in all_messages if hasattr(m, "type") and m.type in ("human", "user")]
+            if len(user_msgs) >= 2:
+                # 解析案由和路由
+                case_raw = user_msgs[-2].content.strip()
+                route_raw = user_msgs[-1].content.strip().upper()
+                case_map = {"欠薪": "欠薪", "开除": "开除", "工伤": "工伤",
+                            "调岗": "调岗", "社保": "社保", "其他": "其他"}
+                case_category = case_map.get(case_raw, case_raw)
+                route_map = {"B": "self_describe", "2": "self_describe",
+                             "C": "interactive", "3": "interactive",
+                             "A": "video_call", "1": "video_call"}
+                route = route_map.get(route_raw)
+                step_answers = {"case_category": case_category}
+                if route:
+                    step_answers["route"] = route
+                updates: Dict[str, Any] = {
+                    "case_category": "__VIDEO_CALL__" if route == "video_call" else case_category,
+                    "current_step": 3,
+                    "completed_steps": {1, 2},
+                    "step_data": {"step2_initial": StepData(answers=step_answers, status="completed",
+                                                             completed_at=datetime.now().isoformat())},
+                    "dirty_steps": set(),
+                    "last_updated": datetime.now().isoformat(),
+                }
+                final_dict: Dict[str, Any] = {"messages": all_messages}
+                final_dict.update(return_dict)
+                return Command(goto="step3_common", update=updates)
+
+        if step_name in ("step3_common", "step4_special") and not tool_calls and last_msg_type == "ai":
+            user_msgs = [m for m in all_messages if hasattr(m, "type") and m.type in ("human", "user")]
+            last_content = user_msgs[-1].content.strip() if user_msgs else ""
+            existing = {}
+            sd = state.get("step_data", {})
+            if step_name in sd:
+                existing = dict(sd[step_name].get("answers", {}))
+            if last_content:
+                existing["最后回答"] = last_content
+            cur_num = STEP_NAMES.index(step_name) + 1
+            nxt_num = cur_num + 1
+            nxt_name = STEP_NAMES[nxt_num - 1] if nxt_num <= len(STEP_NAMES) else END
+            sd_copy = (state.get("step_data", {}) or {}).copy()
+            sd_copy[step_name] = StepData(answers=existing, status="completed",
+                                           completed_at=datetime.now().isoformat())
+            updates = {
+                "step_data": sd_copy,
+                "current_step": nxt_num,
+                "completed_steps": set(state.get("completed_steps", set()) or set()) | {cur_num},
+                "dirty_steps": set(),
+                "last_updated": datetime.now().isoformat(),
+            }
+            final_dict = {"messages": all_messages}
+            final_dict.update(return_dict)
+            return Command(goto=nxt_name, update=updates)
+
+        # 7. 无导航工具调用 → 返回普通字典，让条件边决定路由
         final_dict: Dict[str, Any] = {"messages": all_messages}
         final_dict.update(return_dict)
         return final_dict

@@ -2,36 +2,63 @@ import { test, expect } from '@playwright/test';
 
 test.describe('劳动争议咨询流程', () => {
   test.beforeEach(async ({ page }) => {
-    // 等待后端 API 准备就绪
     await page.goto('/');
-    // 等待页面加载
     await page.waitForLoadState('networkidle');
   });
 
-  test('完整咨询流程：开始咨询 -> 选择案由 -> 选择处理方式 -> 显示问题', async ({ page }) => {
-    // 1. 点击"开始咨询"按钮
-    const startButton = page.getByRole('button', { name: /开始咨询/i });
-    await startButton.waitFor({ state: 'visible', timeout: 30000 });
-    await startButton.click();
-
-    // 2. 选择案由类型（如"欠薪/克扣工资"）
-    const caseTypeButton = page.getByText(/欠薪|克扣工资/i);
-    await caseTypeButton.waitFor({ state: 'visible', timeout: 30000 });
-    await caseTypeButton.click();
-
-    // 3. 选择处理方式（如"我来说"）
-    const handlingButton = page.getByText(/我来说/i);
-    await handlingButton.waitFor({ state: 'visible', timeout: 30000 });
-    await handlingButton.click();
-
-    // 4. 验证页面显示第一个问题
-    // 等待问题加载（后端可能需要时间生成）
-    const questionElement = page.locator('text=/问题|请描述|您的经历/i').first();
-    await expect(questionElement).toBeVisible({ timeout: 60000 });
+  test('首页加载和AI咨询入口验证', async ({ page }) => {
+    await expect(page.locator('text=劳动争议')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('text=AI智能问答')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('text=九步引导').first()).toBeVisible({ timeout: 15000 });
+    const aiLink = page.locator('a[href="/chat"]');
+    await expect(aiLink).toBeVisible({ timeout: 15000 });
   });
 
-  test('页面加载和基础元素验证', async ({ page }) => {
-    // 验证页面标题或主要元素存在
-    await expect(page).toHaveTitle(/劳动争议|咨询|维权/i);
+  test('聊天页面加载和快捷案由按钮验证', async ({ page }) => {
+    await page.goto('/chat');
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('text=/欢迎|请问|劳动争议/i').first()).toBeVisible({ timeout: 30000 });
+    await expect(page.locator('text=欠薪').first()).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('text=开除').first()).toBeVisible({ timeout: 15000 });
+  });
+
+  test('AI咨询完整流程验证', async ({ page }) => {
+    // 进入聊天页面
+    await page.goto('/chat');
+    await page.waitForLoadState('networkidle');
+
+    // 等待欢迎消息
+    await expect(page.locator('text=/欢迎|请问|劳动争议/i').first()).toBeVisible({ timeout: 30000 });
+
+    // 选择欠薪案由 - 点击按钮会自动填入输入框
+    const qianxinBtn = page.locator('button:has-text("欠薪")').first();
+    await expect(qianxinBtn).toBeVisible({ timeout: 15000 });
+    await qianxinBtn.click();
+
+    // 按Enter发送消息
+    const inputArea = page.locator('textarea').first();
+    await expect(inputArea).toBeVisible({ timeout: 5000 });
+    await inputArea.press('Enter');
+
+    // 等待AI响应选择方式
+    await page.waitForTimeout(3000);
+    const optionText = page.locator('text=/A.*转律师|B.*自由描述|C.*交互/').first();
+    await expect(optionText).toBeVisible({ timeout: 20000 });
+
+    // 选择B-自由描述案情（输入B后按Enter发送）
+    const inputB = page.locator('textarea').first();
+    await inputB.fill('B');
+    await inputB.press('Enter');
+
+    // 等待进入通用问题环节
+    await expect(page.locator('text=/通用问题|在职|劳动合同|工资/i').first()).toBeVisible({ timeout: 20000 });
+
+    // 输入"在职"作为就业状态
+    const inputArea2 = page.locator('textarea').first();
+    await inputArea2.fill('在职');
+    await inputArea2.press('Enter');
+
+    // 等待AI响应
+    await page.waitForTimeout(2000);
   });
 });
