@@ -362,6 +362,66 @@ function parseMessageContent(content: string): {
     }
   }
 
+  // Handle SELECT_OPTION markers — [SELECT_OPTION]{...}[/SELECT_OPTION]
+  const selectOptionMatch = content.match(/\[SELECT_OPTION\]([\s\S]*?)\[\/SELECT_OPTION\]/)
+  if (selectOptionMatch) {
+    try {
+      const args = JSON.parse(selectOptionMatch[1])
+      return {
+        text: content.replace(/\[SELECT_OPTION\][\s\S]*?\[\/SELECT_OPTION\]/, "").trim(),
+        artifactType: "tool_call",
+        artifactData: { name: "select_option", ...args },
+      }
+    } catch {
+      return { text: content.replace(/\[SELECT_OPTION\][\s\S]*?\[\/SELECT_OPTION\]/, "").trim() }
+    }
+  }
+
+  // Handle TEXT_INPUT markers — [TEXT_INPUT]{...}[/TEXT_INPUT]
+  const textInputMatch = content.match(/\[TEXT_INPUT\]([\s\S]*?)\[\/TEXT_INPUT\]/)
+  if (textInputMatch) {
+    try {
+      const args = JSON.parse(textInputMatch[1])
+      return {
+        text: content.replace(/\[TEXT_INPUT\][\s\S]*?\[\/TEXT_INPUT\]/, "").trim(),
+        artifactType: "tool_call",
+        artifactData: { name: "text_input", ...args },
+      }
+    } catch {
+      return { text: content.replace(/\[TEXT_INPUT\][\s\S]*?\[\/TEXT_INPUT\]/, "").trim() }
+    }
+  }
+
+  // Handle DATE_PICKER markers — [DATE_PICKER]{...}[/DATE_PICKER]
+  const datePickerMatch = content.match(/\[DATE_PICKER\]([\s\S]*?)\[\/DATE_PICKER\]/)
+  if (datePickerMatch) {
+    try {
+      const args = JSON.parse(datePickerMatch[1])
+      return {
+        text: content.replace(/\[DATE_PICKER\][\s\S]*?\[\/DATE_PICKER\]/, "").trim(),
+        artifactType: "tool_call",
+        artifactData: { name: "date_picker", ...args },
+      }
+    } catch {
+      return { text: content.replace(/\[DATE_PICKER\][\s\S]*?\[\/DATE_PICKER\]/, "").trim() }
+    }
+  }
+
+  // Handle NUMBER_INPUT markers — [NUMBER_INPUT]{...}[/NUMBER_INPUT]
+  const numberInputMatch = content.match(/\[NUMBER_INPUT\]([\s\S]*?)\[\/NUMBER_INPUT\]/)
+  if (numberInputMatch) {
+    try {
+      const args = JSON.parse(numberInputMatch[1])
+      return {
+        text: content.replace(/\[NUMBER_INPUT\][\s\S]*?\[\/NUMBER_INPUT\]/, "").trim(),
+        artifactType: "tool_call",
+        artifactData: { name: "number_input", ...args },
+      }
+    } catch {
+      return { text: content.replace(/\[NUMBER_INPUT\][\s\S]*?\[\/NUMBER_INPUT\]/, "").trim() }
+    }
+  }
+
   // Strip tool command JSON from display (e.g. {"tool":"proceed_to_next_step",...})
   let cleanContent = content.replace(/\{[^{}]*"tool"\s*:[^{}]*\}/g, "").trim()
   // Strip any remaining trailing tool JSON blocks
@@ -491,6 +551,39 @@ function RichMessageRenderer({ message, onQuickAction }: { message: Message; onQ
                   }
                 }}
               />
+            </div>
+          )
+        }
+        if (td.name === "date_picker") {
+          return (
+            <div className="p-3 bg-white border rounded-xl">
+              <p className="text-sm text-gray-600 mb-2">{td.question}</p>
+              <input
+                type="date"
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                onChange={(e) => {
+                  onQuickAction?.(e.target.value)
+                }}
+              />
+            </div>
+          )
+        }
+        if (td.name === "number_input") {
+          return (
+            <div className="p-3 bg-white border rounded-xl">
+              <p className="text-sm text-gray-600 mb-2">{td.question}</p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={td.min}
+                  max={td.max}
+                  className="w-full border rounded-lg px-3 py-2 text-sm"
+                  onChange={(e) => {
+                    onQuickAction?.(e.target.value)
+                  }}
+                />
+                {td.unit && <span className="text-sm text-gray-500">{td.unit}</span>}
+              </div>
             </div>
           )
         }
