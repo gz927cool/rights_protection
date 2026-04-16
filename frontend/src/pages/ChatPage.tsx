@@ -45,6 +45,7 @@ interface StreamEvent {
   session_id?: string
   artifact_type?: string
   artifact_data?: unknown
+  error?: string
 }
 
 interface RightsItem {
@@ -600,6 +601,7 @@ export default function ChatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: userInput, session_id: currentSessionId }),
+        signal: AbortSignal.timeout(60000),
       })
 
       if (!res.ok) {
@@ -623,10 +625,15 @@ export default function ChatPage() {
         ])
 
         let fullContent = ""
+        let streamDone = false
 
-        while (true) {
+        // Read loop with periodic yield to allow React renders
+        const readNext = async (): Promise<void> => {
           const { done, value } = await reader.read()
-          if (done) break
+          if (done) {
+            streamDone = true
+            return
+          }
 
           const chunk = decoder.decode(value, { stream: true })
 
@@ -635,6 +642,19 @@ export default function ChatPage() {
 
             try {
               const data = JSON.parse(line.slice(6)) as StreamEvent
+
+              if (data.error) {
+                setError(data.error)
+                fullContent += `\n\n[系统提示] ${data.error}`
+                setStreamingContent(fullContent)
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === streamingMessageId
+                      ? { ...msg, content: fullContent, streaming: false }
+                      : msg
+                  )
+                )
+              }
 
               if (data.content) {
                 fullContent += data.content
@@ -685,7 +705,15 @@ export default function ChatPage() {
               console.error("解析流数据失败:", parseErr)
             }
           }
+
+          // Yield to event loop periodically to keep UI responsive
+          await new Promise(resolve => setTimeout(resolve, 0))
+          if (!streamDone) {
+            await readNext()
+          }
         }
+
+        await readNext()
       }
 
       // Update session state

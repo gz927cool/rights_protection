@@ -6,8 +6,11 @@ FastAPI 聊天接口 - 九步劳动争议咨询系统
 import uuid
 import os
 import base64
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, AsyncIterator, List, Dict
 from contextlib import asynccontextmanager
+import anyio
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -206,6 +209,7 @@ def post_chat_stream(message: ChatMessage):
     - 结束事件: data: {"done": true, "current_step": N}\n\n
     """
     import json as _json
+    import queue
 
     session_id = message.session_id or str(uuid.uuid4())
 
@@ -228,19 +232,50 @@ def post_chat_stream(message: ChatMessage):
 
     from langchain_core.messages import HumanMessage
 
+    # Sync generator: blocking graph.stream() runs in ThreadPoolExecutor,
+    # communicates via stdlib queue.Queue so StreamingResponse can iterate.
     def event_generator():
+        q: queue.Queue = queue.Queue()
+        CHUNK_TIMEOUT = 30  # seconds per chunk
+
+        def sync_worker():
+            try:
+                for chunk in graph.stream(
+                    {
+                        **state,
+                        "messages": [HumanMessage(content=message.content)],
+                    },
+                    config=config,
+                ):
+                    q.put(chunk)
+                q.put(None)  # Sentinel: stream ended
+            except Exception as e:
+                q.put({"__error": str(e)})
+                q.put(None)
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(sync_worker)
+
         try:
             current_step = 1
             last_message_count = 0
-            prev_step_name = None  # Track step name from previous chunk
+            prev_step_name = None
 
-            for chunk in graph.stream(
-                {
-                    **state,
-                    "messages": [HumanMessage(content=message.content)],
-                },
-                config=config,
-            ):
+            while True:
+                try:
+                    chunk = q.get(timeout=CHUNK_TIMEOUT)
+                except queue.Empty:
+                    executor.shutdown(wait=False)
+                    yield f"data: {_json.dumps({'error': 'AI响应超时（30秒），可能是模型服务暂时不可用，请稍后重试'})}\n\n"
+                    break
+
+                if chunk is None:
+                    break  # Stream ended normally
+
+                if isinstance(chunk, dict) and "__error" in chunk:
+                    yield f"data: {_json.dumps({'error': chunk['__error']})}\n\n"
+                    break
+
                 # chunk = {"step_name": node_output}
                 for step_name, step_result in chunk.items():
                     # 如果同一个 step 再次出现，说明它在等待用户输入，停止 stream
@@ -278,8 +313,8 @@ def post_chat_stream(message: ChatMessage):
 
             # 结束事件
             yield f"data: {_json.dumps({'done': True, 'current_step': current_step, 'session_id': session_id})}\n\n"
-        except Exception as e:
-            yield f"data: {_json.dumps({'error': str(e)})}\n\n"
+        finally:
+            executor.shutdown(wait=False)
 
     return StreamingResponse(
         event_generator(),
