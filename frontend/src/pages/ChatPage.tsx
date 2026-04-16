@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { useParams, Link } from "react-router-dom"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import DocumentPreview, { DocumentDraft } from "../components/DocumentPreview"
 import EvidenceForm from "../components/EvidenceForm"
 import RoadmapView from "../components/RoadmapView"
@@ -407,9 +409,13 @@ function RichMessageRenderer({ message, onQuickAction }: { message: Message; onQ
           {message.streaming ? (
             <StreamingText text={text} />
           ) : (
-            <pre className="whitespace-pre-wrap text-sm font-sans leading-relaxed">
-              {text}
-            </pre>
+            <div className="markdown-content prose prose-sm max-w-none prose-p:my-1 prose-li:my-0.5 prose-headings:my-2 prose-hr:my-3">
+              {text ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {text}
+                </ReactMarkdown>
+              ) : null}
+            </div>
           )}
         </div>
       )}
