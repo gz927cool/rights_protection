@@ -754,6 +754,13 @@ def _build_step_node(step_name: str):
     bound_model = model.bind_tools(tools)
 
     def node(state: ConsultationState) -> Dict:
+        # 交互模式：检查是否从 interrupt 恢复（用户已输入新消息）
+        resume_input = state.get("__resume_input__")
+        if resume_input:
+            # 从 interrupt 恢复：用户输入了消息，追加到消息列表
+            state["messages"].append(HumanMessage(content=resume_input, type="human"))
+            state.pop("__resume_input__", None)
+
         # 1. 自动加载证据清单（step6 首次进入时）
         return_dict: Dict[str, Any] = {}
         if step_name == "step6_evidence" and not state.get("evidence_items"):
@@ -766,21 +773,20 @@ def _build_step_node(step_name: str):
         # 2. 动态构建 system prompt
         system_prompt = build_step_system_prompt(step_name, state)
 
-        # 3. 构造消息历史：SystemMessage(prompt) + 用户消息
-        all_messages: List[Any] = [SystemMessage(content=system_prompt)] + list(state.get("messages", []))
+        # 3. 构造消息历史：SystemMessage(prompt) + 用户消息（截断旧消息防止超出token限制）
+        MAX_CONTEXT_MESSAGES = 10  # 保留最近N条消息，节省token
+        raw_messages = list(state.get("messages", []))
+        trimmed_messages = raw_messages[-MAX_CONTEXT_MESSAGES:] if len(raw_messages) > MAX_CONTEXT_MESSAGES else raw_messages
+        all_messages: List[Any] = [SystemMessage(content=system_prompt)] + list(trimmed_messages)
 
-        # 4. 工具调用循环
-        while True:
-            ai_msg = bound_model.invoke(all_messages)
-            all_messages.append(ai_msg)
+        # 4. 单次 LLM 调用
+        ai_msg = bound_model.invoke(all_messages)
+        all_messages.append(ai_msg)
 
-            tool_calls = ai_msg.tool_calls if hasattr(ai_msg, "tool_calls") else []
-            if not tool_calls:
-                # LLM 直接回复，不调用工具
-                final_dict = {"messages": all_messages}
-                final_dict.update(return_dict)
-                return final_dict
+        tool_calls = ai_msg.tool_calls if hasattr(ai_msg, 'tool_calls') else []
 
+        # 5. 导航工具调用 → 直接跳转，不 interrupt
+        if tool_calls:
             for call in tool_calls:
                 tool_name = call.get("name", "")
                 tool_args = call.get("args", {})
@@ -801,13 +807,11 @@ def _build_step_node(step_name: str):
                     )
                     all_messages.append(tool_msg)
 
-                    # 合并更新
                     final_dict: Dict[str, Any] = {"messages": all_messages}
                     final_dict.update(update)
                     if return_dict.get("evidence_items") and "evidence_items" not in final_dict:
                         final_dict["evidence_items"] = return_dict["evidence_items"]
 
-                    # 返回 Command 以携带路由信息
                     return Command(goto=goto, update=final_dict)
                 else:
                     tool_msg = ToolMessage(
@@ -815,6 +819,11 @@ def _build_step_node(step_name: str):
                         tool_call_id=call.get("id", ""),
                     )
                     all_messages.append(tool_msg)
+
+        # 6. 无导航工具调用 → 返回普通字典，让条件边决定路由
+        final_dict: Dict[str, Any] = {"messages": all_messages}
+        final_dict.update(return_dict)
+        return final_dict
 
     return node
 
@@ -864,32 +873,52 @@ def _build_evidence_completeness_node():
 # ============================================================================
 # 路由函数
 # ============================================================================
-
-def _route_to_next(state: ConsultationState) -> str:
-    """
-    路由函数：根据 current_step 决定下一步（唯一真实来源）。
-    current_step 是 1-based（1-10），STEP_NAMES 是 0-indexed 列表。
-    当 current_step = N 时，路由到 STEP_NAMES[N-1]（当前节点）。
-    条件边在每次节点执行后重新评估，此时 current_step 可能已被更新。
-    """
-    current = state.get("current_step", 1)
-    if 1 <= current <= len(STEP_NAMES):
-        return STEP_NAMES[current - 1]
-    return END
-
-
 # ============================================================================
 # StateGraph 构建
 # ============================================================================
+
+def _route_from_start(state: ConsultationState) -> str:
+    """
+    入口路由：根据 current_step 恢复到对应步骤节点。
+    每次新的 invoke 从 START 进入，由这里路由到正确的步骤。
+    """
+    current = state.get("current_step", 1)
+    msg_count = len(state.get("messages", []))
+    if 1 <= current <= len(STEP_NAMES):
+        return STEP_NAMES[current - 1]
+    return STEP_NAMES[0]  # 默认从 step1 开始
+
+
+def _route_after_step(state: ConsultationState) -> str:
+    """
+    交互模式路由：每次 step node 执行后检查是否结束本轮对话。
+    
+    - 如果 LLM 返回了普通 AIMessage（无导航工具调用）→ 返回 END，等待用户下一条消息
+    - 如果 LLM 调用了导航工具（如 proceed_to_next_step）→ 工具返回 Command(goto=next_step)
+      绕过了条件边，graph 直接跳转到目标节点
+    """
+    messages = state.get("messages", [])
+    if messages:
+        last = messages[-1]
+        if hasattr(last, "tool_calls") and last.tool_calls:
+            # LLM 调用了工具，导航工具会在 Command 中指定目标
+            # 条件边这里返回什么无所谓，Command(goto=...) 会覆盖
+            return END
+        if hasattr(last, "type") and last.type == "ai":
+            # LLM 直接回复（无工具调用）→ 暂停等待用户输入
+            return END
+    return END
+
 
 def create_consultation_graph():
     """
     构建九步咨询系统 StateGraph。
 
-    架构（Phase 4 重构）：
+    架构（Phase 5 重构 - Handoffs 模式）：
     - 每步 node 用 @tool + model.bind_tools() 处理工具调用
-    - 工具返回 Command 对象触发路由
-    - 路由由 current_step 决定（_route_to_next）
+    - 节点返回普通 dict（LLM 无导航工具）或 Command(goto=next_step)（导航工具）
+    - 条件边检测最后消息：普通 AIMessage → END（等待用户）；导航工具由 Command 处理
+    - 用户输入后重新从 START 进入，走到对应步骤节点继续
     """
     workflow = StateGraph(
         ConsultationState,
@@ -900,18 +929,19 @@ def create_consultation_graph():
     for step_name in STEP_NAMES:
         workflow.add_node(step_name, _build_step_node(step_name))
 
-    # 边：起点 → step1
-    workflow.add_edge(START, STEP_NAMES[0])
+    # 起点 → 当前步骤（根据 current_step 恢复检查点）
+    workflow.add_conditional_edges(
+        START,
+        _route_from_start,
+        {name: name for name in STEP_NAMES},
+    )
 
-    # 条件路由：每个步骤之后根据 current_step 决定下一步
+    # 每个步骤后加条件边：LLM 无导航工具调用时暂停，等待用户输入
     for step_name in STEP_NAMES:
         workflow.add_conditional_edges(
             step_name,
-            _route_to_next,
-            {
-                **{name: name for name in STEP_NAMES},
-                END: END,
-            },
+            _route_after_step,
+            {END: END},
         )
 
     checkpointer = InMemorySaver()
