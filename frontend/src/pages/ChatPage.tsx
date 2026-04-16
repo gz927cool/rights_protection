@@ -921,8 +921,8 @@ export default function ChatPage() {
       </div>
 
       {/* Input Area */}
-      <div className="border-t bg-white p-4">
-        <div className="flex gap-2 items-end max-w-3xl mx-auto">
+      <div className="border-t border-gray-200 bg-gradient-to-t from-gray-50 to-white p-4 shadow-[0_-4px_20px_rgba(0,0,0,0.04)]">
+        <div className="flex gap-3 items-end max-w-3xl mx-auto">
           <textarea
             ref={inputRef}
             value={input}
@@ -935,17 +935,17 @@ export default function ChatPage() {
             }}
             placeholder="描述您的劳动争议问题..."
             rows={1}
-            className="flex-1 border border-gray-300 rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none text-sm"
+            className="flex-1 border border-gray-200 rounded-2xl px-5 py-3.5 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent focus:shadow-[0_0_0_4px_rgba(59,130,246,0.12)] resize-none text-sm text-gray-800 placeholder-gray-400 bg-white transition-all duration-200"
             style={{ maxHeight: "120px" }}
           />
           <button
             onClick={sendMessage}
             disabled={loading || !input.trim()}
             className={cn(
-              "px-5 py-3 rounded-xl font-medium transition-all",
+              "flex-shrink-0 w-11 h-11 rounded-2xl flex items-center justify-center transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500",
               loading || !input.trim()
-                ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                : "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+                ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                : "bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-200 active:scale-95 active:bg-blue-800"
             )}
           >
             {loading ? (
@@ -954,13 +954,13 @@ export default function ChatPage() {
                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
               </svg>
             ) : (
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-5 h-5 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
               </svg>
             )}
           </button>
         </div>
-        <p className="text-xs text-gray-400 text-center mt-2">
+        <p className="text-xs text-gray-400 text-center mt-2.5 font-medium tracking-wide">
           按 Enter 发送，Shift+Enter 换行
         </p>
       </div>
