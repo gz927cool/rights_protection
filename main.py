@@ -394,6 +394,99 @@ async def upload_evidence(
     }
 
 
+class ReplayRequest(BaseModel):
+    checkpoint_id: str
+
+
+class HistoryEntry(BaseModel):
+    checkpoint_id: str
+    step: Optional[int]
+    next_node: Optional[str]
+    source: Optional[str]
+    timestamp: Optional[str]
+
+
+@app.get("/sessions/{session_id}/history")
+def get_session_history(session_id: str) -> List[HistoryEntry]:
+    """
+    获取会话执行历史（所有 checkpoint 记录）。
+    可用于前端展示时间线，让用户选择从哪个点重新执行。
+    """
+    config = {"configurable": {"thread_id": session_id}}
+    graph = get_graph()
+
+    try:
+        history = list(graph.get_state_history(config))
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"无法获取历史记录: {str(e)}")
+
+    entries = []
+    for state in history:
+        cfg = state.config.get("configurable", {})
+        checkpoint_id = cfg.get("checkpoint_id", "")
+        metadata = getattr(state, "metadata", {}) or {}
+        step = metadata.get("step")
+        source = metadata.get("source")
+        # 尝试从 values 中提取 timestamp
+        values = getattr(state, "values", {}) or {}
+        last_updated = values.get("last_updated")
+
+        # next 字段：即将执行的节点（用于判断"停在哪儿了"）
+        next_nodes = getattr(state, "next", None)
+
+        entries.append(HistoryEntry(
+            checkpoint_id=checkpoint_id,
+            step=step,
+            next_node=next_nodes[0] if next_nodes else None,
+            source=source,
+            timestamp=last_updated,
+        ))
+
+    return entries
+
+
+@app.post("/sessions/{session_id}/replay")
+def replay_session(session_id: str, body: ReplayRequest):
+    """
+    从指定 checkpoint 重新执行。
+
+    - checkpoint_id: 从 /history 接口获取的 checkpoint_id
+    - 返回重放后的最终状态
+
+    注意：重放会重新执行 LLM 调用，消耗 API 配额。
+    """
+    config = {
+        "configurable": {
+            "thread_id": session_id,
+            "checkpoint_id": body.checkpoint_id,
+        },
+        "recursion_limit": 100,
+    }
+    graph = get_graph()
+
+    try:
+        result = graph.invoke(None, config=config)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"重放失败: {str(e)}")
+
+    messages = result.get("messages", [])
+    ai_message = ""
+    for msg in reversed(messages):
+        if hasattr(msg, "type") and msg.type == "ai":
+            ai_message = msg.content
+            break
+
+    current_step = result.get("current_step", 1)
+
+    return {
+        "session_id": session_id,
+        "checkpoint_id": body.checkpoint_id,
+        "message": ai_message,
+        "current_step": current_step,
+        "current_step_name": STEP_DISPLAY_NAMES.get(STEP_NAMES[current_step - 1], STEP_NAMES[current_step - 1]),
+    }
+
+
 @app.post("/sessions/{session_id}/reset")
 def reset_session(session_id: str):
     """重置会话（重新开始）"""

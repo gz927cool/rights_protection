@@ -82,7 +82,6 @@ GLOBAL_CONTEXT = """## 系统信息
 - back_to_previous_step: 返回上一步修改
 - go_to_step: 跳转到指定步骤
 - request_missing_info: 追问用户缺失信息
-- pause_and_save: 暂停并保存进度
 - finish_consultation: 完成咨询
 - upload_evidence: 上传证据文件
 - request_lawyer_help: 一键求助律师
@@ -413,16 +412,6 @@ def back_to_previous_step(
         "last_updated": datetime.now().isoformat(),
     }
     return Command(goto=step_name, update=updates)
-
-
-@tool
-def pause_and_save(runtime: ToolRuntime) -> str:
-    """暂停并保存进度"""
-    token = (runtime.state.get("session_id", "") or "") + "_paused"
-    return (
-        f"进度已保存。您的恢复码：[{token}]。"
-        f"下次输入此码即可继续。"
-    )
 
 
 @tool
