@@ -163,20 +163,18 @@ class Roadmap(TypedDict):
 # ============================================================================
 
 STEP_NAMES: List[str] = [
-    "step1_selector",       # 1: 模式选择
-    "step2_initial",        # 2: 问题初判
-    "step3_common",        # 3: 通用12问
-    "step4_special",        # 4: 特殊问题
-    "step5_qualification", # 5: 案件定性
-    "step6_evidence",       # 6: 证据攻略
-    "step7_risk",          # 7: 风险提示
-    "step8_documents",      # 8: 文书生成
-    "step9_roadmap",       # 9: 行动路线图
-    "step10_review",       # 10: 求助复核
+    "step2_initial",        # 1: 问题初判（AI问答入口，跳过模式选择）
+    "step3_common",         # 2: 通用12问
+    "step4_special",        # 3: 特殊问题
+    "step5_qualification",  # 4: 案件定性
+    "step6_evidence",       # 5: 证据攻略
+    "step7_risk",           # 6: 风险提示
+    "step8_documents",      # 7: 文书生成
+    "step9_roadmap",        # 8: 行动路线图
+    "step10_review",        # 9: 求助复核
 ]
 
 STEP_DISPLAY_NAMES: Dict[str, str] = {
-    "step1_selector": "模式选择",
     "step2_initial": "问题初判",
     "step3_common": "通用问题",
     "step4_special": "特殊问题",

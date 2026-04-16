@@ -107,31 +107,7 @@ GLOBAL_CONTEXT = """## 系统信息
 # ============================================================================
 
 STEP_PROMPTS: Dict[str, str] = {
-    "step1_selector": """## 本步任务：模式选择
 
-你的任务：欢迎用户，介绍两种咨询模式，引导用户选择。
-
-## 两种咨询模式
-
-### 模式一：律师视频咨询
-- 连接值班律师进行一对一视频咨询
-- 服务时间：工作日工作时间（周一至周五 8:30-17:30）
-- 适用场景：情况紧急、案情复杂需要当面沟通
-- 注意：可能需要排队等待
-
-### 模式二：AI智能问答（全流程引导）
-- 通过AI引导完成从咨询到文书生成的完整维权流程
-- 适用场景：一般性劳动争议、有充足时间系统梳理
-- 优势：随时暂停保存、9步完整覆盖
-
-## 回复格式要求
-1. 用自然语言向用户介绍两种模式
-2. 用户明确选择后，调用 proceed_to_next_step 工具
-
-## 结束条件
-用户明确选择后，调用 proceed_to_next_step：
-{"tool":"proceed_to_next_step","route":"ai_consultation"}
-""",
 
     "step2_initial": """## 本步任务：问题初判
 
@@ -567,11 +543,6 @@ def request_lawyer_help(runtime: ToolRuntime) -> str:
 # ============================================================================
 
 STEP_TOOL_SETS: Dict[str, List[Any]] = {
-    "step1_selector": [
-        proceed_to_next_step,
-        request_missing_info,
-        pause_and_save,
-    ],
     "step2_initial": [
         proceed_to_next_step,
         go_to_step,
@@ -749,7 +720,7 @@ def _build_step_node(step_name: str):
     为指定步骤构建一个 node 函数。
     使用 @tool 装饰的工具 + model.bind_tools() 循环处理。
     """
-    tools = STEP_TOOL_SETS.get(step_name, STEP_TOOL_SETS["step1_selector"])
+    tools = STEP_TOOL_SETS.get(step_name, STEP_TOOL_SETS["step2_initial"])
     tools_by_name = {t.name: t for t in tools}
     bound_model = model.bind_tools(tools)
 

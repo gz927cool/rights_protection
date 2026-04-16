@@ -37,7 +37,7 @@ def get_step_display(step_num):
 
 def main():
     print("=" * 60)
-    print("九步咨询系统 - 交互测试")
+    print("九步咨询系统 - 交互测试（跳过模式选择，直接进入问题初判）")
     print("=" * 60)
     print("输入 q/quit 退出\n")
 
