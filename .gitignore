@@ -6,6 +6,7 @@
 .env
 .idea/*
 data/*
+outputs/*
 .vscode/launch.json
 data/bak.txt
 .langgraph_api/
