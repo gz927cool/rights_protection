@@ -19,8 +19,6 @@ from pydantic import BaseModel
 import uvicorn
 
 from langgraph.graph import START, END
-from langgraph.checkpoint.memory import InMemorySaver
-
 from langgraph_model.consultation_graph import get_consultation_graph
 from langgraph_model.consultation_state import (
     create_initial_state,
@@ -49,8 +47,6 @@ app.add_middleware(
 # ============================================================================
 # Lifespan
 # ============================================================================
-
-_checkpointer = InMemorySaver()
 
 _graph = None
 
@@ -285,19 +281,35 @@ def post_chat_stream(message: ChatMessage):
                     if isinstance(step_result, dict):
                         messages = step_result.get("messages", [])
 
-                        # Only process NEW messages (messages added since last chunk)
+                        # 1) 先发出 tool_results（工具执行完成事件）
+                        tool_results = step_result.get("tool_results", [])
+                        for tr in tool_results:
+                            payload = _json.dumps({
+                                "tool_call_id": tr.get("id", ""),
+                                "result": tr.get("result", ""),
+                            })
+                            yield f"event: tool_call_done\ndata: {payload}\n\n"
+
+                        # 2) 处理消息（content + tool_calls）
                         if len(messages) > last_message_count:
                             new_messages = messages[last_message_count:]
                             for msg in new_messages:
-                                if (
-                                    hasattr(msg, "type")
-                                    and msg.type == "ai"
-                                    and hasattr(msg, "content")
-                                    and msg.content
-                                ):
-                                    content = msg.content
-                                    payload = _json.dumps({"content": content, "done": False})
-                                    yield f"data: {payload}\n\n"
+                                if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "content"):
+                                    # 2a) tool_calls 事件（工具调用请求）
+                                    if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                        for tc in msg.tool_calls:
+                                            tc_payload = _json.dumps({
+                                                "name": tc.get("name", ""),
+                                                "arguments": tc.get("args", {}),
+                                            })
+                                            yield f"event: tool_calls\ndata: {tc_payload}\n\n"
+                                    # 2b) content 事件（文本输出）
+                                    if msg.content:
+                                        content_payload = _json.dumps({
+                                            "content": msg.content,
+                                            "role": "assistant",
+                                        })
+                                        yield f"event: content\ndata: {content_payload}\n\n"
                             last_message_count = len(messages)
 
                         # 更新 current_step
@@ -312,7 +324,7 @@ def post_chat_stream(message: ChatMessage):
                 break
 
             # 结束事件
-            yield f"data: {_json.dumps({'done': True, 'current_step': current_step, 'session_id': session_id})}\n\n"
+            yield f"event: done\ndata: {_json.dumps({'current_step': current_step, 'session_id': session_id})}\n\n"
         finally:
             executor.shutdown(wait=False)
 

@@ -15,7 +15,7 @@ interface Message {
   role: "user" | "assistant"
   content: string
   streaming?: boolean
-  artifactType?: "rights" | "risk" | "evidence" | "document" | "roadmap" | "form"
+  artifactType?: "rights" | "risk" | "evidence" | "document" | "roadmap" | "form" | "tool_call"
   artifactData?: unknown
 }
 
@@ -41,10 +41,22 @@ interface EvidenceItem {
 }
 
 interface StreamEvent {
+  // OpenAI SSE event type
+  event?: "content" | "tool_calls" | "tool_call_done" | "done"
+  // content event
   content?: string
-  done?: boolean
+  role?: string
+  // tool_calls event
+  name?: string
+  arguments?: Record<string, unknown>
+  // tool_call_done event
+  tool_call_id?: string
+  result?: string
+  // done event
   current_step?: number
   session_id?: string
+  // Legacy / compatibility
+  done?: boolean
   artifact_type?: string
   artifact_data?: unknown
   error?: string
@@ -295,21 +307,22 @@ function RiskAssessmentDisplay({ risks }: { risks: RiskItem[] }) {
 // Quick Action Buttons
 // =============================================================================
 
+const QUICK_CATEGORIES = [
+  { label: "欠薪/克扣工资", icon: "💰" },
+  { label: "被辞退/开除", icon: "🚫" },
+  { label: "工伤认定", icon: "🏥" },
+  { label: "调岗降薪", icon: "📉" },
+  { label: "社保欠缴", icon: "🏦" },
+  { label: "其他争议", icon: "❓" },
+]
+
 function QuickActions({ onSelect }: { onSelect: (action: string) => void }) {
-  const categories = [
-    { label: "欠薪/克扣工资", icon: "💰" },
-    { label: "被辞退/开除", icon: "🚫" },
-    { label: "工伤认定", icon: "🏥" },
-    { label: "调岗降薪", icon: "📉" },
-    { label: "社保欠缴", icon: "🏦" },
-    { label: "其他争议", icon: "❓" },
-  ]
 
   return (
     <div className="my-4">
       <p className="text-xs text-gray-500 mb-2">快捷问题类型：</p>
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        {categories.map((cat) => (
+        {QUICK_CATEGORIES.map((cat) => (
           <button
             key={cat.label}
             onClick={() => onSelect(`我想咨询${cat.label}问题`)}
@@ -333,6 +346,22 @@ function parseMessageContent(content: string): {
   artifactType?: string
   artifactData?: unknown
 } {
+  // Handle TOOL_CALL markers first — extract interactive component specs
+  const toolCallMatch = content.match(/\[TOOL_CALL:(\w+)\]([\s\S]*?)\[\/TOOL_CALL\]/)
+  if (toolCallMatch) {
+    const toolName = toolCallMatch[1]
+    try {
+      const args = JSON.parse(toolCallMatch[2])
+      return {
+        text: content.replace(/\[TOOL_CALL:\w+\][\s\S]*?\[\/TOOL_CALL\]/, "").trim(),
+        artifactType: "tool_call",
+        artifactData: { name: toolName, ...args },
+      }
+    } catch {
+      return { text: content.replace(/\[TOOL_CALL:\w+\][\s\S]*?\[\/TOOL_CALL\]/, "").trim() }
+    }
+  }
+
   // Strip tool command JSON from display (e.g. {"tool":"proceed_to_next_step",...})
   let cleanContent = content.replace(/\{[^{}]*"tool"\s*:[^{}]*\}/g, "").trim()
   // Strip any remaining trailing tool JSON blocks
@@ -428,6 +457,45 @@ function RichMessageRenderer({ message, onQuickAction }: { message: Message; onQ
       {artifactType === "risk" && artifactData !== undefined ? (
         <RiskAssessmentDisplay risks={artifactData as RiskItem[]} />
       ) : null}
+
+      {/* Interactive tool_call component */}
+      {artifactType === "tool_call" && artifactData !== undefined ? (() => {
+        const td = artifactData as { name: string; question?: string; options?: string[]; placeholder?: string; multiline?: boolean; min?: number; max?: number; unit?: string }
+        if (td.name === "select_option" && td.options) {
+          return (
+            <div className="flex flex-wrap gap-2 p-3 bg-white border rounded-xl">
+              {td.options.map((opt, i) => (
+                <button
+                  key={i}
+                  onClick={() => onQuickAction?.(opt)}
+                  className="px-4 py-2 rounded-full border border-blue-200 text-blue-700 text-sm hover:bg-blue-50 transition-colors"
+                >
+                  {opt}
+                </button>
+              ))}
+            </div>
+          )
+        }
+        if (td.name === "text_input") {
+          return (
+            <div className="p-3 bg-white border rounded-xl">
+              <p className="text-sm text-gray-600 mb-2">{td.question}</p>
+              <textarea
+                placeholder={td.placeholder}
+                rows={td.multiline ? 3 : 1}
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !td.multiline) {
+                    e.preventDefault()
+                    onQuickAction?.((e.target as HTMLTextAreaElement).value)
+                  }
+                }}
+              />
+            </div>
+          )
+        }
+        return null
+      })() : null}
 
       {/* Inline quick actions - clicking category buttons sends the text */}
       {!message.streaming && !artifactType && onQuickAction && text.length > 30 ? (
@@ -557,7 +625,6 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const [activeSessionId, setActiveSessionId] = useState(sessionId || "new")
-  const currentSessionId = activeSessionId
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -569,9 +636,9 @@ export default function ChatPage() {
 
   // Fetch session state
   useEffect(() => {
-    if (!currentSessionId || currentSessionId === "new") return
+    if (!activeSessionId || activeSessionId === "new") return
 
-    fetch(`/sessions/${currentSessionId}`)
+    fetch(`/sessions/${activeSessionId}`)
       .then((r) => r.json())
       .then((data) => {
         if (data && data.current_step) {
@@ -579,7 +646,7 @@ export default function ChatPage() {
         }
       })
       .catch(() => {})
-  }, [currentSessionId])
+  }, [activeSessionId])
 
   const handleQuickSelect = (text: string) => {
     setInput(text)
@@ -606,7 +673,7 @@ export default function ChatPage() {
       const res = await fetch("/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: userInput, session_id: currentSessionId }),
+        body: JSON.stringify({ content: userInput, session_id: activeSessionId }),
         signal: AbortSignal.timeout(60000),
       })
 
@@ -643,7 +710,14 @@ export default function ChatPage() {
 
           const chunk = decoder.decode(value, { stream: true })
 
+          // Track current OpenAI SSE event type
+          let currentEvent: StreamEvent["event"] | null = null
+
           for (const line of chunk.split("\n")) {
+            if (line.startsWith("event: ")) {
+              currentEvent = line.slice(7).trim() as StreamEvent["event"]
+              continue
+            }
             if (!line.startsWith("data: ")) continue
 
             try {
@@ -660,33 +734,55 @@ export default function ChatPage() {
                       : msg
                   )
                 )
+                currentEvent = null
               }
 
-              if (data.content) {
-                fullContent += data.content
-                setStreamingContent(fullContent)
-
-                // Update the streaming message
-                setMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === streamingMessageId
-                      ? { ...msg, content: fullContent }
-                      : msg
+              // Handle by event type (OpenAI SSE format)
+              if (currentEvent === "tool_calls") {
+                // Tool call request — render interactive component
+                const toolName = data.name || ""
+                const args = data.arguments || {}
+                if (toolName === "select_option" || toolName === "text_input" || toolName === "date_picker" || toolName === "number_input") {
+                  // Append component marker to the current message content
+                  const componentMarker = `[TOOL_CALL:${toolName}]${JSON.stringify(args)}[/TOOL_CALL]`
+                  fullContent += componentMarker
+                  setStreamingContent(fullContent)
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === streamingMessageId
+                        ? { ...msg, content: fullContent }
+                        : msg
+                    )
                   )
-                )
-              }
-
-              if (data.artifact_type) {
-                setMessages((prev) =>
-                  prev.map((msg) =>
-                    msg.id === streamingMessageId
-                      ? { ...msg, artifactType: data.artifact_type as Message["artifactType"], artifactData: data.artifact_data }
-                      : msg
+                }
+                currentEvent = null
+              } else if (currentEvent === "content" || !currentEvent) {
+                // Content event or legacy format (no event prefix = content for backwards compat)
+                if (data.content) {
+                  fullContent += data.content
+                  setStreamingContent(fullContent)
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === streamingMessageId
+                        ? { ...msg, content: fullContent }
+                        : msg
+                    )
                   )
-                )
-              }
-
-              if (data.done) {
+                }
+                if (data.artifact_type) {
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === streamingMessageId
+                        ? { ...msg, artifactType: data.artifact_type as Message["artifactType"], artifactData: data.artifact_data }
+                        : msg
+                    )
+                  )
+                }
+                currentEvent = null
+              } else if (currentEvent === "tool_call_done") {
+                // Tool execution result — could log or handle if needed
+                currentEvent = null
+              } else if (currentEvent === "done") {
                 // Mark streaming as complete
                 setMessages((prev) =>
                   prev.map((msg) =>
@@ -695,20 +791,20 @@ export default function ChatPage() {
                       : msg
                   )
                 )
-
                 // Auto-open panel based on step
                 const step = data.current_step
                 if (step === 5) setActivePanel("evidence")
                 else if (step === 7) setActivePanel("document")
                 else if (step === 8) setActivePanel("roadmap")
-              }
-
-              if (data.session_id && data.session_id !== activeSessionId) {
-                setActiveSessionId(data.session_id)
-                window.history.replaceState(null, "", `/chat/${data.session_id}`)
+                if (data.session_id && data.session_id !== activeSessionId) {
+                  setActiveSessionId(data.session_id)
+                  window.history.replaceState(null, "", `/chat/${data.session_id}`)
+                }
+                currentEvent = null
               }
             } catch (parseErr) {
               console.error("解析流数据失败:", parseErr)
+              currentEvent = null
             }
           }
 
@@ -723,8 +819,8 @@ export default function ChatPage() {
       }
 
       // Update session state
-      if (currentSessionId !== "new") {
-        fetch(`/sessions/${currentSessionId}`)
+      if (activeSessionId !== "new") {
+        fetch(`/sessions/${activeSessionId}`)
           .then((r) => r.json())
           .then(setSessionState)
           .catch((stateErr) => {
@@ -887,14 +983,7 @@ export default function ChatPage() {
                 常见问题类型
               </p>
               <div className="grid grid-cols-2 gap-2">
-                {[
-                  { label: "欠薪/克扣工资", icon: "💰" },
-                  { label: "被辞退/开除", icon: "🚫" },
-                  { label: "工伤认定", icon: "🏥" },
-                  { label: "调岗降薪", icon: "📉" },
-                  { label: "社保欠缴", icon: "🏦" },
-                  { label: "其他争议", icon: "❓" },
-                ].map((cat) => (
+                {QUICK_CATEGORIES.map((cat) => (
                   <button
                     key={cat.label}
                     onClick={() => handleQuickSelect(`我想咨询${cat.label}问题`)}
@@ -974,7 +1063,7 @@ export default function ChatPage() {
       {/* Sidebar Panel */}
       <SidebarPanel
         type={activePanel}
-        sessionId={currentSessionId}
+        sessionId={activeSessionId}
         sessionState={sessionState}
         onClose={() => setActivePanel(null)}
       />

@@ -299,16 +299,6 @@ Q1-Q12全部完成或用户主动跳过剩余问题
 
 
 # ============================================================================
-# Mock Runtime（工具函数内访问 state）
-# ============================================================================
-
-class MockRuntime:
-    """模拟 ToolRuntime，让工具函数可以读写 state"""
-    def __init__(self, state: Dict):
-        self.state = state
-
-
-# ============================================================================
 # 工具定义（@tool 装饰器）
 # ============================================================================
 
@@ -528,6 +518,93 @@ def request_lawyer_help(runtime: ToolRuntime) -> str:
 
 
 # ============================================================================
+# 交互类工具（generate-ui 组件生成）
+# ============================================================================
+
+@tool
+def select_option(runtime: ToolRuntime, options: List[str], question: str) -> str:
+    """
+    请求用户从选项列表中选择。
+    - options: 可选列表，如 ["劳动合同", "劳务合同", "实习合同"]
+    - question: 向用户展示的问题文字
+    返回格式化的选择提示，供前端渲染为选择按钮组件。
+    """
+    import json as _json
+    payload = _json.dumps({
+        "component": "select_option",
+        "question": question,
+        "options": options,
+    })
+    return f"[SELECT_OPTION]{payload}[/SELECT_OPTION]"
+
+
+@tool
+def text_input(
+    runtime: ToolRuntime,
+    question: str,
+    placeholder: str = "",
+    multiline: bool = False,
+) -> str:
+    """
+    请求用户输入文本。
+    - question: 向用户展示的问题文字
+    - placeholder: 输入框占位提示
+    - multiline: 是否允许多行输入
+    返回格式化的文本输入提示，供前端渲染为文本输入组件。
+    """
+    import json as _json
+    payload = _json.dumps({
+        "component": "text_input",
+        "question": question,
+        "placeholder": placeholder,
+        "multiline": multiline,
+    })
+    return f"[TEXT_INPUT]{payload}[/TEXT_INPUT]"
+
+
+@tool
+def date_picker(runtime: ToolRuntime, question: str) -> str:
+    """
+    请求用户选择日期。
+    - question: 向用户展示的问题文字
+    返回格式化的日期选择提示，供前端渲染为日期选择器组件。
+    """
+    import json as _json
+    payload = _json.dumps({
+        "component": "date_picker",
+        "question": question,
+    })
+    return f"[DATE_PICKER]{payload}[/DATE_PICKER]"
+
+
+@tool
+def number_input(
+    runtime: ToolRuntime,
+    question: str,
+    min_value: float = 0,
+    max_value: float = 999999999,
+    unit: str = "",
+) -> str:
+    """
+    请求用户输入数字。
+    - question: 向用户展示的问题文字
+    - min_value: 最小值
+    - max_value: 最大值
+    - unit: 单位，如 "元"、"天" 等
+    返回格式化的数字输入提示，供前端渲染为数字输入组件。
+    """
+    import json as _json
+    payload = _json.dumps({
+        "component": "number_input",
+        "question": question,
+        "min": min_value,
+        "max": max_value,
+        "unit": unit,
+    })
+    return f"[NUMBER_INPUT]{payload}[/NUMBER_INPUT]"
+
+
+# ============================================================================
 # 所有工具汇总（按 step 分组）
 # ============================================================================
 
@@ -537,11 +614,19 @@ STEP_TOOL_SETS: Dict[str, List[Any]] = {
         go_to_step,
         request_missing_info,
         back_to_previous_step,
+        select_option,
+        text_input,
+        date_picker,
+        number_input,
     ],
     "step3_common": [
         proceed_to_next_step,
         request_missing_info,
         back_to_previous_step,
+        select_option,
+        text_input,
+        date_picker,
+        number_input,
     ],
     "step4_special": [
         proceed_to_next_step,
@@ -754,8 +839,11 @@ def _build_step_node(step_name: str):
                 if not matched:
                     continue
 
-                mock_runtime = MockRuntime(state)
-                result = matched.func(runtime=mock_runtime, **tool_args)
+                # Lightweight wrapper so tools can read/write state via runtime.state
+                class _Runtime:
+                    def __init__(self, st):
+                        self.state = st
+                result = matched.func(runtime=_Runtime(state), **tool_args)
 
                 if isinstance(result, Command):
                     goto = result.goto if hasattr(result, "goto") else END
@@ -767,7 +855,14 @@ def _build_step_node(step_name: str):
                     )
                     all_messages.append(tool_msg)
 
-                    final_dict: Dict[str, Any] = {"messages": all_messages}
+                    final_dict: Dict[str, Any] = {
+                        "messages": all_messages,
+                        "tool_results": [{
+                            "id": call.get("id", ""),
+                            "name": tool_name,
+                            "result": str(result) if result else "",
+                        }],
+                    }
                     final_dict.update(update)
                     if return_dict.get("evidence_items") and "evidence_items" not in final_dict:
                         final_dict["evidence_items"] = return_dict["evidence_items"]
@@ -788,51 +883,6 @@ def _build_step_node(step_name: str):
     return node
 
 
-# ============================================================================
-# 证据初始化 Node（step6 专用）
-# ============================================================================
-
-def _build_evidence_init_node():
-    """step6 进入时，从 case_category 加载证据清单到 state"""
-    def node(state: ConsultationState) -> Dict:
-        case_category = state.get("case_category")
-        if case_category and case_category not in ("__VIDEO_CALL__",):
-            items = get_evidence_checklist(case_category)
-            return {"evidence_items": items}
-        return {}
-    return node
-
-
-# ============================================================================
-# 证据完整度评估 Node（step6 离开时）
-# ============================================================================
-
-def _build_evidence_completeness_node():
-    """评估证据完整度并写入 step_data"""
-    def node(state: ConsultationState) -> Dict:
-        evidence_items = state.get("evidence_items", [])
-        if not evidence_items:
-            return {}
-
-        completeness = evaluate_evidence_completeness(evidence_items)
-        step_data = (state.get("step_data", {}) or {}).copy()
-        if "step6_evidence" not in step_data:
-            step_data["step6_evidence"] = StepData(
-                answers={},
-                status="in_progress",
-                completed_at=None,
-                extra={"evidence_completeness": completeness},
-            )
-        else:
-            step_data["step6_evidence"]["extra"]["evidence_completeness"] = completeness
-
-        return {"step_data": step_data}
-    return node
-
-
-# ============================================================================
-# 路由函数
-# ============================================================================
 # ============================================================================
 # StateGraph 构建
 # ============================================================================
@@ -922,13 +972,3 @@ def get_consultation_graph() -> Any:
     return _graph_instance
 
 
-# ============================================================================
-# 便利入口
-# ============================================================================
-
-def start_consultation(
-    session_id: str,
-    member_id: Optional[str] = None,
-    resume_token: Optional[str] = None,
-) -> Dict:
-    return create_initial_state(session_id, member_id)
