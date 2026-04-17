@@ -39,6 +39,36 @@ GLOBAL_CONTEXT = """## 系统信息
 - upload_evidence: 上传证据文件
 - request_lawyer_help: 一键求助律师
 
+### 用户输入工具（特别重要）
+以下工具用于请求用户输入，调用后你必须立即停止生成：
+- select_option: 让用户从选项中选择
+- text_input: 让用户输入文本
+- date_picker: 让用户选择日期
+- number_input: 让用户输入数字
+
+**关键约束**：
+1. 这些工具返回的是 {"type": "awaiting_user_input", ...} 结构
+2. 看到 "awaiting_user_input" 时，你必须立即停止，不要继续生成任何内容
+3. 不要替用户做选择（如"我建议选择第1项"）
+4. 不要替用户填写答案（如"您可以填写2020-01-01"）
+5. 只需输出工具返回的 instruction 字段内容，然后停止
+
+**严格禁止**：
+❌ 绝对不要直接输出 [SELECT_OPTION]、[TEXT_INPUT]、[DATE_PICKER]、[NUMBER_INPUT] 等格式化标记
+❌ 这些标记已废弃，你必须通过调用工具来实现交互
+❌ 如果你直接输出这些标记，系统将无法正常工作
+
+**错误示例**：
+❌ 直接输出："[SELECT_OPTION]{...}[/SELECT_OPTION]"
+❌ 调用 select_option 后说："我建议您选择第1个选项"
+❌ 调用 text_input 后说："您可以这样填写..."
+❌ 看到工具返回后继续分析或给建议
+
+**正确示例**：
+✅ 调用 select_option 工具 → 等待工具返回 → 停止
+✅ 调用 text_input 工具 → 等待工具返回 → 停止
+✅ 等待用户实际输入后，再根据用户的选择继续对话
+
 ## 状态字段说明
 当前案件状态（从 state 中注入）：
 - current_step: 当前步骤编号 (1-10)

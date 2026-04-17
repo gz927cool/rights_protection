@@ -427,12 +427,15 @@ def _get_step_agent(step_name: str):
         return _step_agents[step_name]
 
     tools = STEP_TOOL_SETS.get(step_name, [])
-    system_prompt = build_step_system_prompt(step_name, {})
+
+    # 使用全局上下文作为基础 system prompt
+    # 动态部分会在 wrapper 中通过 messages 注入
+    base_prompt = GLOBAL_CONTEXT + "\n\n" + STEP_PROMPTS.get(step_name, "")
 
     agent = create_agent(
         model,
         tools=tools,
-        system_prompt=system_prompt,
+        system_prompt=base_prompt,
         name=step_name,  # Agent 级别名称标识
     )
     _step_agents[step_name] = agent
@@ -442,16 +445,32 @@ def _get_step_agent(step_name: str):
 def _step_node_wrapper(step_name: str):
     """
     包装函数：调用 create_agent 子图。
-    - 动态 system prompt 通过 agent.invoke() 的 config传入
+    - 动态 system prompt 通过 messages 注入
     - 工具返回 Command(goto=..., graph=Command.PARENT) 由 LangGraph 自动处理路由
     """
     agent = _get_step_agent(step_name)
 
     def wrapper(state: ConsultationState) -> Command | Dict:
+        # 构建动态 system prompt
         dynamic_prompt = build_step_system_prompt(step_name, state)
+
+        # 将动态 prompt 注入到 messages 中
+        messages = state.get("messages", [])
+
+        # 如果第一条消息不是 SystemMessage，或者内容不同，则更新
+        if not messages or not isinstance(messages[0], SystemMessage) or messages[0].content != dynamic_prompt:
+            # 创建新的 messages 列表，第一条是动态 system prompt
+            updated_messages = [SystemMessage(content=dynamic_prompt)]
+            # 保留其他消息（跳过旧的 SystemMessage）
+            for msg in messages:
+                if not isinstance(msg, SystemMessage):
+                    updated_messages.append(msg)
+
+            # 更新状态
+            state = {**state, "messages": updated_messages}
+
         response = agent.invoke(state)
         return response
-
 
     return wrapper
 
@@ -504,6 +523,13 @@ def _route_from_start(state: ConsultationState) -> str:
     current = state.get("current_step", 2)
     if current is None or current == 0:
         current = 2
+
+    # 确保 current 是整数类型
+    try:
+        current = int(current)
+    except (ValueError, TypeError):
+        current = 2
+
     # Map current_step to STEP_NAMES index: step2_initial is at index 0, so offset by 2
     if 2 <= current <= len(STEP_NAMES) + 1:
         return STEP_NAMES[current - 2]

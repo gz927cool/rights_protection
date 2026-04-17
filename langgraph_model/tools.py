@@ -56,20 +56,30 @@ def calculate_economic_compensation(months_employed: int, avg_monthly_wage: floa
 # ============================================================================
 
 @tool
-def select_option(runtime: ToolRuntime, options: List[str], question: str) -> str:
+def select_option(runtime: ToolRuntime, options: List[str], question: str) -> Dict:
     """
     请求用户从选项列表中选择。
+
+    重要：调用此工具后，你必须立即停止生成，不要替用户做选择。
+    工具返回的是"等待用户输入"的状态标记，不是用户的选择结果。
+
     - options: 可选列表，如 ["劳动合同", "劳务合同", "实习合同"]
     - question: 向用户展示的问题文字
-    返回格式化的选择提示，供前端渲染为选择按钮组件。
+
+    返回值说明：
+    - type: "awaiting_user_input" 表示正在等待用户选择
+    - display: 前端渲染用的格式化字符串
     """
     import json as _json
-    payload = _json.dumps({
+
+    # 返回结构化数据，明确标记为"等待用户输入"
+    return {
+        "type": "awaiting_user_input",
         "component": "select_option",
         "question": question,
         "options": options,
-    })
-    return f"[SELECT_OPTION]{payload}[/SELECT_OPTION]"
+        "instruction": "⚠️ 等待用户选择中，请勿继续生成内容或替用户做决定。"
+    }
 
 
 @tool
@@ -78,37 +88,41 @@ def text_input(
     question: str,
     placeholder: str = "",
     multiline: bool = False,
-) -> str:
+) -> Dict:
     """
     请求用户输入文本。
+
+    重要：调用此工具后，你必须立即停止生成，等待用户输入。
+
     - question: 向用户展示的问题文字
     - placeholder: 输入框占位提示
     - multiline: 是否允许多行输入
-    返回格式化的文本输入提示，供前端渲染为文本输入组件。
     """
-    import json as _json
-    payload = _json.dumps({
+    return {
+        "type": "awaiting_user_input",
         "component": "text_input",
         "question": question,
         "placeholder": placeholder,
         "multiline": multiline,
-    })
-    return f"[TEXT_INPUT]{payload}[/TEXT_INPUT]"
+        "instruction": "⚠️ 等待用户输入文本中，请勿继续生成内容或替用户回答。"
+    }
 
 
 @tool
-def date_picker(runtime: ToolRuntime, question: str) -> str:
+def date_picker(runtime: ToolRuntime, question: str) -> Dict:
     """
     请求用户选择日期。
+
+    重要：调用此工具后，你必须立即停止生成，等待用户选择日期。
+
     - question: 向用户展示的问题文字
-    返回格式化的日期选择提示，供前端渲染为日期选择器组件。
     """
-    import json as _json
-    payload = _json.dumps({
+    return {
+        "type": "awaiting_user_input",
         "component": "date_picker",
         "question": question,
-    })
-    return f"[DATE_PICKER]{payload}[/DATE_PICKER]"
+        "instruction": "⚠️ 等待用户选择日期中，请勿继续生成内容或替用户填写。"
+    }
 
 
 @tool
@@ -118,21 +132,23 @@ def number_input(
     min_value: float = 0,
     max_value: float = 999999999,
     unit: str = "",
-) -> str:
+) -> Dict:
     """
     请求用户输入数字。
+
+    重要：调用此工具后，你必须立即停止生成，等待用户输入。
+
     - question: 向用户展示的问题文字
     - min_value: 最小值
     - max_value: 最大值
     - unit: 单位，如 "元"、"天" 等
-    返回格式化的数字输入提示，供前端渲染为数字输入组件。
     """
-    import json as _json
-    payload = _json.dumps({
+    return {
+        "type": "awaiting_user_input",
         "component": "number_input",
         "question": question,
         "min": min_value,
         "max": max_value,
         "unit": unit,
-    })
-    return f"[NUMBER_INPUT]{payload}[/NUMBER_INPUT]"
+        "instruction": "⚠️ 等待用户输入数字中，请勿继续生成内容或替用户填写。"
+    }
