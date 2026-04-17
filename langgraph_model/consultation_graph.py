@@ -10,6 +10,7 @@ import json
 from typing import Annotated, Dict, List, Literal, Optional, Any
 from datetime import datetime
 from operator import add as messages_add
+import uuid
 
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
@@ -34,6 +35,13 @@ from langgraph_model.consultation_state import (
     get_evidence_guidance,
     evaluate_evidence_completeness,
 )
+from langgraph_model.prompts import STEP_PROMPTS,GLOBAL_CONTEXT
+from langgraph_model.tools import (
+    select_option,
+    text_input,
+    date_picker,
+    number_input,
+)
 
 # ============================================================================
 # LLM 模型
@@ -47,393 +55,6 @@ model = ChatOpenAI(
     max_tokens=4096,
 )
 
-# ============================================================================
-# 全局上下文：所有 Agent 共享
-# ============================================================================
-
-GLOBAL_CONTEXT = """## 系统信息
-你是宿迁市总工会劳动争议智能咨询系统的AI法律助手。
-当前版本：九步引导式咨询系统 v2.0
-
-## 全局流程说明
-用户正在经历一个结构化的九步咨询流程：
-1. 模式选择 - 选择律师视频或AI智能问答
-2. 问题初判 - 确定咨询路径
-3. 通用问题 - 12个基础问题
-4. 特殊问题 - 按案由追问
-5. 案件定性 - 生成权益清单
-6. 证据攻略 - 收集证据
-7. 风险提示 - 风险评估
-8. 文书生成 - 生成仲裁申请
-9. 行动路线图 - 维权指引
-10. 求助复核 - AI复核+律师求助
-
-## 你的角色定位
-- 你是一个专业、温暖的法律咨询助手
-- 始终用中文回复
-- 用通俗易懂的语言解释法律术语
-- 注意识别用户情感状态，适当安抚
-
-## 工具调用原则（重要 - 必须遵守）
-当你需要执行一个动作（如跳转到下一步、返回上一步、暂停保存等）时，
-你必须调用对应的工具。直接回复用户的文本问题，不需要调用任何工具。
-
-### 可用命令工具
-- proceed_to_next_step: 结束当前步骤，进入下一步（必须携带必要的参数）
-- back_to_previous_step: 返回上一步修改
-- go_to_step: 跳转到指定步骤
-- request_missing_info: 追问用户缺失信息
-- finish_consultation: 完成咨询
-- upload_evidence: 上传证据文件
-- request_lawyer_help: 一键求助律师
-
-## 状态字段说明
-当前案件状态（从 state 中注入）：
-- current_step: 当前步骤编号 (1-10)
-- case_category: 案由分类（欠薪/开除/工伤/调岗/社保/其他）
-- session_id: 会话ID
-
-## 脏数据处理
-如果 dirty_steps 包含当前步骤，说明之前的回答已被修改。
-你应该告知用户："检测到之前的回答已被修改，当前内容已标记为待更新。"
-
-## 严格遵守
-- 回复应当帮助用户完成当前步骤的任务
-- 调用工具后等待结果，根据结果继续对话
-"""
-
-# ============================================================================
-# 步骤特有 Prompt（每步独立）
-# ============================================================================
-
-STEP_PROMPTS: Dict[str, str] = {
-
-
-    "step2_initial": """## 本步任务：问题初判
-
-用户已选择【AI智能问答】。现在需要确定处理路径。
-
-## 当前状态（从上下文获取）
-
-系统已提供案由分类信息：
-- 如果"案由分类"显示为"尚未确定"，说明需要提取案由
-- 如果"案由分类"已显示具体类型（如"欠薪"），说明案由已提取，直接进入第二步
-
-## 执行顺序（严格按顺序，禁止跳步）
-
-### 第一步：提取案由
-
-**如果"案由分类"已确定为某类型**（如"欠薪"）：
-1. case_category_extracted = true（无需再提取）
-2. 直接输出确认："好的，您的案件属于【{已确定类型}】类争议。"
-3. 进入第二步
-
-**如果"案由分类"为"尚未确定"**：
-如果用户输入中包含案由关键词（欠薪/克扣/开除/工伤/调岗/社保），则：
-1. 立即提取 case_category（见下方映射）
-2. 确认案由：直接输出"好的，您的案件属于【欠薪】类争议。"
-3. case_category_extracted = true
-4. 进入第二步
-
-如果用户没有提供案由关键词：
-1. 输出"请问您遇到了什么类型的劳动争议？[欠薪/开除/工伤/调岗/社保/其他]"
-2. 等待用户回复
-3. 用户回复后提取 case_category，case_category_extracted = true
-4. 进入第二步
-
-案由映射：
-- 欠薪/克扣工资/拖欠工资/加班费 → case_category = "欠薪"
-- 开除/辞退/解除合同/被公司赶走 → case_category = "开除"
-- 工伤/工作受伤/职业伤害 → case_category = "工伤"
-- 调岗/降薪/岗位调整 → case_category = "调岗"
-- 社保/保险/公积金 → case_category = "社保"
-- 其他/其他争议 → case_category = "其他"
-- 数字 1-6 → 按顺序对应上述
-
-### 第二步：结束（立即执行）
-
-**重要：只有当 case_category_extracted = true 时才能执行此步**
-
-调用 proceed_to_next_step，携带：
-step_answers={"case_category": "[已提取的案由]"}
-
-## 禁止事项（违反则对话顺序混乱）
-- case_category_extracted=false 时，禁止进入下一步
-- proceed_to_next_step 必须携带 step_answers 参数，其中包含 case_category
-- 智能体不询问入口路径选择：该逻辑由前端处理
-""",
-
-    "step3_common": """## 本步任务：收集用户基本信息，进入下一步
-
-你需要通过对话收集用户的基本信息。可使用追问工具询问缺失项，但每次只问一个关键问题。
-
-## 必收集的信息（共11项）
-
-| # | 字段名 | 说明 |
-|---|--------|------|
-| 1 | employment_status | 就业状态：在职/离职/待岗 |
-| 2 | contract_status | 劳动合同签订情况 |
-| 3 | monthly_salary | 月工资 |
-| 4 | salary_payment_method | 工资发放方式 |
-| 5 | social_security | 社保缴纳情况 |
-| 6 | job_position | 工作岗位 |
-| 7 | entry_date | 入职时间 |
-| 8 | weekly_hours | 每周工作时间 |
-| 9 | claims | 涉及诉求（可多选） |
-| 10 | amount_involved | 涉及金额 |
-| 11 | expected_result | 期望结果 |
-
-## 信息缺口检测（每次回复前必须执行）
-
-从用户输入和上下文提取已收集的字段，与上表对比：
-
-**如果存在缺失字段** → 进入追问模式（见下方）
-**如果11项全部收集完毕，或用户说"够了"/"跳过"/"进入下一步"** → 调用 proceed_to_next_step
-**如果用户明确要求结束当前步骤** → 调用 proceed_to_next_step
-
-## 追问模式规则
-
-**什么时候追问**：
-- 有缺失字段时，用适当工具询问缺失项
-
-**用什么工具问**（每次只用一个）：
-- select_option：多选一（如就业状态、合同签订情况）
-- text_input：自由文本（如工作岗位）
-- date_picker：日期（如入职时间）
-- number_input：数字（如月工资、每周工时）
-
-**禁止事项**：
-- 不要一次追问多个缺失项（每次只问1个）
-- 不要重复询问已确认的字段
-
-## proceed_to_next_step 调用规则
-
-调用时 step_answers 必须包含：
-- 所有已收集的字段（未收集的字段 value 置为 null）
-- case_category 字段（如果能从内容推断则填入，否则 null）
-
-**示例**：
-```json
-{
-  "employment_status": "离职",
-  "contract_status": "已签订",
-  "monthly_salary": "8000",
-  "salary_payment_method": "银行转账",
-  "social_security": "已缴纳",
-  "job_position": "外卖骑手",
-  "entry_date": "2023-01-15",
-  "weekly_hours": "40",
-  "claims": "欠薪,经济补偿金",
-  "amount_involved": "24000",
-  "expected_result": "拿回工资和赔偿金",
-  "case_category": "欠薪"
-}
-```
-""",
-
-    "step4_special": """## 本步任务：案由特殊问题追问
-
-基于 step3 的案由判断，从特殊问题库加载追问。
-
-## 核心事实清单（STOP_FACTS）
-每回答一题后判断是否已厘清：
-1. 用人单位名称
-2. 入职时间
-3. 劳动关系状态
-4. 核心争议内容
-5. 涉及金额
-
-## 案由特殊问题（欠薪/开除/工伤/调岗/社保各有一套）
-
-## 结束条件
-5个核心事实全部厘清 → proceed_to_next_step
-用户主动要求跳过 → proceed_to_next_step
-""",
-
-    "step5_qualification": """## 本步任务：案件定性 + 权益清单生成
-
-基于 step3 和 step4 的回答，结合三级案由体系，生成规范化的案件描述和权益清单。
-
-## 第一步：读取案件事实
-
-从 step3_common 和 step4_special 的 answers 中提取：
-- 用人单位名称
-- 入职时间、离职时间（如有）
-- 月工资、工资发放方式
-- 劳动关系状态
-- 诉求类型（欠薪/开除/工伤/调岗/社保）
-- 涉及金额
-- 特殊事实（如加班、合同签订情况等）
-
-## 第二步：匹配三级案由（重要）
-
-根据案件事实，从以下案由体系中匹配最合适的三级案由。
-
-### 欠薪类（初始案由=欠薪）优先匹配：
-- 追索基本工资纠纷 > 工资扣减与拖欠支付纠纷
-  关键词：克扣工资、拖欠工资、停工停产
-- 追索加班工资纠纷 > 加班事实认定纠纷
-  关键词：加班、延长工时、值班
-- 追索加班工资纠纷 > 特殊情形下的加班费争议
-  关键词：包薪制、年薪制、综合工时
-- 奖金/提成/绩效工资纠纷 > 支付条件成就争议
-  关键词：提成、绩效、奖金、佣金
-- 津贴/补贴发放纠纷
-  关键词：高温津贴、夜班津贴、岗位津贴
-
-### 开除类（初始案由=开除）优先匹配：
-- 违法解除/终止劳动合同赔偿金纠纷 > 解除事实依据不足争议纠纷
-  关键词：被辞退、被开除、违法解除
-- 违法解除/终止劳动合同赔偿金纠纷 > 解除理由与事实不符争议纠纷
-  关键词：旷工认定、违纪事实不符
-- 用人单位单方解除劳动合同纠纷 > 因劳动者严重违纪解除纠纷
-  关键词：违反规章制度、严重违纪
-- 协商解除劳动合同纠纷 > 就经济补偿/赔偿金支付产生的纠纷
-  关键词：协商解除、补偿金额
-- 劳动者单方解除劳动合同纠纷 > 劳动者即时解除（被迫离职）纠纷
-  关键词：被迫离职、未缴社保、未发工资
-
-### 工伤类（初始案由=工伤）优先匹配：
-- 工伤保险待遇纠纷 > 停工留薪期工资（原工资福利待遇）争议纠纷
-- 工伤保险待遇纠纷 > 一次性伤残待遇争议纠纷
-- 工伤保险待遇纠纷 > 工伤医疗费及康复费争议纠纷
-
-### 调岗类（初始案由=调岗）优先匹配：
-- 履行/变更劳动合同纠纷 > 单方调岗合理性认定纠纷
-  关键词：强制调岗、降薪调岗、不胜任调岗
-- 履行/变更劳动合同纠纷 > 薪酬调整（降薪）合法性纠纷
-  关键词：降薪、工资减少
-
-## 第三步：生成案件事实描述
-
-格式：
-"申请人[姓名]于[入职时间]入职[用人单位]，担任[岗位]，
-[劳动关系状态：全职/非全日制]。因[核心争议内容]，
-产生劳动争议。涉及金额约[金额]元。"
-
-## 第四步：生成权益清单
-
-根据案由和事实，对应生成权益项，每项包含：
-- right_name: 权益名称
-- amount: 金额（计算得出）
-- calculation_basis: 计算依据（如：2个月 × 12,000元/月）
-- legal_basis: 法律依据（如：《劳动合同法》第30条）
-
-### 常见权益计算公式（根据案由套用）
-- 欠薪：月数 × 月工资
-- 违法解除(2N)：年限 × 2 × 月工资（最高12年）
-- 经济补偿金(N)：年限 × 月工资（满6个月按1年算，不满6个月按0.5年算）
-- 未签合同双倍工资差额：11个月 × 月工资（入职第2个月起算，最多11个月）
-- 加班费：延长工时×1.5倍/休息日×2倍/法定节假日×3倍 × 小时工资
-- 未休年休假工资：未休假天数 × 日工资 × 3倍（其中2倍为工资，1倍为补偿）
-
-## 输出格式（严格按此格式输出）
-
-```
-【案件事实】
-[规范化描述]
-
-【案由定性】
-一级案由：[匹配的一级案由]
-二级案由：[匹配的二级案由]
-三级案由：[匹配的三级案由]
-三级案由说明：[三级案由的纠纷描述]
-
-【权益清单】
-| 序号 | 权益名称 | 金额 | 计算依据 | 法律依据 |
-|------|----------|------|----------|----------|
-| 1 | [名称] | [金额]元 | [计算过程] | [法条] |
-...
-
-请确认以上内容是否准确，如有误请指出。
-```
-
-## 结束条件
-用户确认"准确"或"继续"后，调用 proceed_to_next_step，携带：
-{"qualification": {"case_facts": "...", "case_types": ["一级/二级/三级"], "rights_list": [...], "legal_basis": [...]}}
-""",
-
-    "step6_evidence": """## 本步任务：证据攻略
-
-基于 case_category 从证据库加载对应证据清单。
-
-## 证据状态标记
-引导用户为每项标记：
-- A（已有）：已持有，准备上传
-- B（可补充）：可以通过努力获取
-- C（无法获得）：客观上无法获取
-
-## 证据完整度评级
-- 充分：A类证据≥3个，A+B≥80%
-- 基本完整：A类≥2个，或A+B≥60%
-- 不完整：A类=1个，或A+B<60%
-- 严重缺乏：A类=0
-
-## 结束条件
-调用 proceed_to_next_step，携带 evidence_items（含状态标记）和 evidence_completeness（评级）
-""",
-
-    "step7_risk": """## 本步任务：风险评估
-
-综合分析案件事实、证据完整度，给出风险提示。
-
-## 风险等级
-- 高危：时效过期/关键证据全缺/充分抗辩理由
-- 中危：部分证据缺失/计算可能偏差
-- 低危：证据充分/事实清楚
-
-## 结束条件
-调用 proceed_to_next_step，携带 risk_assessment
-""",
-
-    "step8_documents": """## 本步任务：文书生成
-
-基于案件信息、证据清单、权益清单，生成仲裁申请书。
-
-## 文书修改
-用户可以提问：
-- "这个金额怎么计算？" → 解释计算逻辑
-- "能帮我修改表述吗？" → 提供修改建议
-
-## 结束条件
-调用 proceed_to_next_step，携带 document_draft
-""",
-
-    "step9_roadmap": """## 本步任务：行动路线图
-
-展示三步维权路径：协商 → 调解 → 仲裁
-
-## 宿迁市总工会调解热线
-0527-843XXXXX（适宜调解案件优先推荐）
-
-## 结束条件
-调用 proceed_to_next_step，进入 step10_review
-""",
-
-    "step10_review": """## 本步任务：求助复核
-
-提供预设复核模板和一键律师求助。
-
-## 预设复核模板（10个）
-1. 证据检查：证据清单是否充分？
-2. 金额计算：赔偿金额计算对吗？
-3. 胜算评估：仲裁胜算多大？
-4. 策略咨询：先协商还是直接仲裁？
-5. 文书检查：申请书有没有问题？
-6. 证据获取：B类证据怎么获取？
-7. 信息纠错：发现之前回答错了
-8. 法律解读：涉及哪些法律条款？
-9. 时间规划：维权时间线是什么？
-10. 备选方案：仲裁不受理怎么办？
-
-## 一键求助律师
-发送完整案件材料给工会值班律师，值班律师将在1-3个工作日内回复。
-
-## 结束条件
-用户点击"完成咨询" → finish_consultation
-用户选择继续 → proceed_to_next_step（进入路线图）
-""",
-}
 
 
 # ============================================================================
@@ -469,74 +90,31 @@ def proceed_to_next_step(
     当前步骤完成，携带数据进入下一步。
     返回 Command 让 LangGraph 路由到下一个 step node。
     """
-    import json as _json
-
-    # Get current step from the last AIMessage's name attribute
-    # (agent subgraph doesn't have access to parent state's current_step)
     messages = runtime.state.get("messages", [])
+    last_ai_message = next(
+        msg for msg in reversed(messages) if isinstance(msg, AIMessage)
+    )
     current_step_name = None
-    for msg in reversed(messages):
-        if hasattr(msg, 'name') and msg.name in STEP_NAMES:
-            current_step_name = msg.name
-            break
+    if hasattr(last_ai_message, 'name') and last_ai_message.name in STEP_NAMES:
+        current_step_name = last_ai_message.name
 
     if not current_step_name:
-        # Fallback: assume step2_initial
         current_step_name = STEP_NAMES[0]
 
     # Map step name to step number: step2_initial=2, step3_common=3, etc.
-    current_step_num = STEP_NAMES.index(current_step_name) + 2
+    current_step_num = STEP_NAMES.index(current_step_name)
     target_step_num = current_step_num + 1
+    next_step_name = STEP_NAMES[target_step_num]
 
-    extra = {}
-    if extra_data:
-        if isinstance(extra_data, str):
-            try:
-                extra = _json.loads(extra_data)
-            except Exception:
-                extra = {"raw": extra_data}
-        elif isinstance(extra_data, dict):
-            extra = extra_data
 
-    # 如果传入了 qualification（step5 案件定性），放入 extra 中
-    if qualification:
-        extra["qualification"] = qualification
-
-    step_data = (runtime.state.get("step_data", {}) or {}).copy()
-    step_data[current_step_name] = StepData(
-        answers=step_answers,
-        status="completed",
-        completed_at=datetime.now().isoformat(),
-        extra=extra,
+    transfer_message = ToolMessage(
+        content="跳转到下一步",
+        tool_call_id=runtime.tool_call_id,
     )
-
-    updates: Dict[str, Any] = {
-        "step_data": step_data,
-        "current_step": target_step_num,
-        "completed_steps": {current_step_num},
-        "dirty_steps": get_dirty_range(target_step_num),
-        "last_updated": datetime.now().isoformat(),
-    }
-
-    # 如果有 qualification，也更新到顶层 state
-    if qualification:
-        updates["qualification"] = qualification
-
-    if current_step_name == "step2_initial":
-        case_category = step_answers.get("case_category")
-        if case_category:
-            updates["case_category"] = case_category
-
-    if current_step_name == "step3_common":
-        case_category = step_answers.get("case_category")
-        if case_category:
-            updates["case_category"] = case_category
-
-    # 路由目标：下一个 step node 的名字
-    # ToolMessage 由 agent 子图自动处理，不需要在 Command.update 中包含 messages
-    if target_step_num > len(STEP_NAMES) + 1:
-        return Command(goto=END, update=updates, graph=Command.PARENT)
-    next_step_name = STEP_NAMES[target_step_num - 2]
+    updates={
+            "active_agent": next_step_name,
+            "messages": [last_ai_message, transfer_message],
+        }
     return Command(goto=next_step_name, update=updates, graph=Command.PARENT)
 
 
@@ -562,17 +140,6 @@ def back_to_previous_step(
     }
     # ToolMessage 由 agent 子图自动处理
     return Command(goto=step_name, update=updates, graph=Command.PARENT)
-
-
-@tool
-def check_and_apply_dirty(
-    runtime: ToolRuntime,
-    action: Literal["recalculate", "keep"],
-) -> str:
-    """脏数据确认：重新计算或保留现有内容"""
-    if action == "recalculate":
-        return "脏数据已清除，将重新生成。"
-    return "现有内容已保留，继续。"
 
 
 @tool
@@ -677,92 +244,6 @@ def request_lawyer_help(runtime: ToolRuntime) -> str:
     )
 
 
-# ============================================================================
-# 交互类工具（generate-ui 组件生成）
-# ============================================================================
-
-@tool
-def select_option(runtime: ToolRuntime, options: List[str], question: str) -> str:
-    """
-    请求用户从选项列表中选择。
-    - options: 可选列表，如 ["劳动合同", "劳务合同", "实习合同"]
-    - question: 向用户展示的问题文字
-    返回格式化的选择提示，供前端渲染为选择按钮组件。
-    """
-    import json as _json
-    payload = _json.dumps({
-        "component": "select_option",
-        "question": question,
-        "options": options,
-    })
-    return f"[SELECT_OPTION]{payload}[/SELECT_OPTION]"
-
-
-@tool
-def text_input(
-    runtime: ToolRuntime,
-    question: str,
-    placeholder: str = "",
-    multiline: bool = False,
-) -> str:
-    """
-    请求用户输入文本。
-    - question: 向用户展示的问题文字
-    - placeholder: 输入框占位提示
-    - multiline: 是否允许多行输入
-    返回格式化的文本输入提示，供前端渲染为文本输入组件。
-    """
-    import json as _json
-    payload = _json.dumps({
-        "component": "text_input",
-        "question": question,
-        "placeholder": placeholder,
-        "multiline": multiline,
-    })
-    return f"[TEXT_INPUT]{payload}[/TEXT_INPUT]"
-
-
-@tool
-def date_picker(runtime: ToolRuntime, question: str) -> str:
-    """
-    请求用户选择日期。
-    - question: 向用户展示的问题文字
-    返回格式化的日期选择提示，供前端渲染为日期选择器组件。
-    """
-    import json as _json
-    payload = _json.dumps({
-        "component": "date_picker",
-        "question": question,
-    })
-    return f"[DATE_PICKER]{payload}[/DATE_PICKER]"
-
-
-@tool
-def number_input(
-    runtime: ToolRuntime,
-    question: str,
-    min_value: float = 0,
-    max_value: float = 999999999,
-    unit: str = "",
-) -> str:
-    """
-    请求用户输入数字。
-    - question: 向用户展示的问题文字
-    - min_value: 最小值
-    - max_value: 最大值
-    - unit: 单位，如 "元"、"天" 等
-    返回格式化的数字输入提示，供前端渲染为数字输入组件。
-    """
-    import json as _json
-    payload = _json.dumps({
-        "component": "number_input",
-        "question": question,
-        "min": min_value,
-        "max": max_value,
-        "unit": unit,
-    })
-    return f"[NUMBER_INPUT]{payload}[/NUMBER_INPUT]"
-
 
 # ============================================================================
 # 所有工具汇总（按 step 分组）
@@ -773,7 +254,6 @@ STEP_TOOL_SETS: Dict[str, List[Any]] = {
         proceed_to_next_step,
         go_to_step,
         request_missing_info,
-        back_to_previous_step,
         select_option,
         text_input,
         date_picker,
@@ -781,7 +261,6 @@ STEP_TOOL_SETS: Dict[str, List[Any]] = {
     ],
     "step3_common": [
         proceed_to_next_step,
-        back_to_previous_step,
         select_option,
         text_input,
         date_picker,
@@ -789,32 +268,26 @@ STEP_TOOL_SETS: Dict[str, List[Any]] = {
     ],
     "step4_special": [
         proceed_to_next_step,
-        back_to_previous_step,
     ],
     "step5_qualification": [
         proceed_to_next_step,
         request_missing_info,
-        back_to_previous_step,
     ],
     "step6_evidence": [
         proceed_to_next_step,
         upload_evidence,
         request_missing_info,
-        back_to_previous_step,
     ],
     "step7_risk": [
         proceed_to_next_step,
         request_missing_info,
-        back_to_previous_step,
     ],
     "step8_documents": [
         proceed_to_next_step,
         request_missing_info,
-        back_to_previous_step,
     ],
     "step9_roadmap": [
         proceed_to_next_step,
-        back_to_previous_step,
     ],
     "step10_review": [
         proceed_to_next_step,
@@ -855,9 +328,6 @@ def build_step_system_prompt(step_name: str, state: dict) -> str:
         f"案由分类：{case_category or '尚未确定'}",
         f"已完成步骤：{sorted(completed_steps) if completed_steps else '无'}",
     ]
-
-    if is_dirty:
-        context_lines.append("⚠️ 注意：检测到之前的回答已被修改，当前内容可能需要更新！")
 
     step_data = state.get("step_data", {})
 
@@ -956,7 +426,7 @@ def _get_step_agent(step_name: str):
     if step_name in _step_agents:
         return _step_agents[step_name]
 
-    tools = STEP_TOOL_SETS.get(step_name, STEP_TOOL_SETS["step2_initial"])
+    tools = STEP_TOOL_SETS.get(step_name, [])
     system_prompt = build_step_system_prompt(step_name, {})
 
     agent = create_agent(
@@ -978,44 +448,9 @@ def _step_node_wrapper(step_name: str):
     agent = _get_step_agent(step_name)
 
     def wrapper(state: ConsultationState) -> Command | Dict:
-        resume_input = state.get("__resume_input__")
-        messages_to_send = list(state.get("messages", []))
-
-        if resume_input:
-            messages_to_send.append(HumanMessage(content=resume_input, type="human"))
-
         dynamic_prompt = build_step_system_prompt(step_name, state)
-
-        # Track message IDs we already have
-        existing_ids = {msg.id for msg in messages_to_send if hasattr(msg, 'id')}
-        collected_messages = []
-        command_to_return = None
-
-        try:
-            for chunk in agent.stream(
-                {"messages": messages_to_send},
-                config={
-                    "configurable": {"name": step_name},
-                    "system_message": dynamic_prompt,
-                },
-                stream_mode="updates"
-            ):
-                for node_name, node_output in chunk.items():
-                    if isinstance(node_output, dict) and "messages" in node_output:
-                        collected_messages.extend(node_output["messages"])
-        except ParentCommand as e:
-            command_to_return = e.args[0]
-
-        # Filter out messages we already had (by ID)
-        new_messages = [msg for msg in collected_messages
-                       if not hasattr(msg, 'id') or msg.id not in existing_ids]
-
-        if command_to_return:
-            if new_messages:
-                command_to_return.update["messages"] = new_messages
-            return command_to_return
-
-        return {"messages": new_messages}
+        response = agent.invoke(state)
+        return response
 
 
     return wrapper
@@ -1093,7 +528,8 @@ def _route_after_step(state: ConsultationState) -> str:
         if hasattr(last, "type") and last.type == "ai":
             # LLM 直接回复（无工具调用）→ 暂停等待用户输入
             return END
-    return END
+    active = state.get("active_agent")
+    return active if active else END
 
 
 def create_consultation_graph():
@@ -1133,7 +569,7 @@ def create_consultation_graph():
         workflow.add_conditional_edges(
             step_name,
             _route_after_step,
-            {END: END},
+            STEP_NAMES + [END],
         )
 
     checkpointer = InMemorySaver()

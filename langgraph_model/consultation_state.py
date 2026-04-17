@@ -216,6 +216,7 @@ class ConsultationState(TypedDict):
     messages: Annotated[List[Any], messages_add]
 
     # --- 九步核心 ---
+    active_agent: Annotated[int, _last_writer]  # 1-10, current step
     current_step: Annotated[int, _last_writer]  # 1-10, current step
     completed_steps: Annotated[set[int], _union_sets]  # 已完成步骤集合
     step_data: Annotated[Dict[str, StepData], _merge_dicts]  # 每步采集的数据
