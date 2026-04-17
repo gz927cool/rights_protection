@@ -18,6 +18,7 @@ from langgraph.errors import ParentCommand
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain.tools import tool, ToolRuntime
+from langchain.agents import create_agent
 
 from langgraph_model.load_cfg import OPENAI_API_KEY, MODEL_NAME, BASE_URL
 from langgraph_model.consultation_state import (
@@ -149,72 +150,85 @@ STEP_PROMPTS: Dict[str, str] = {
 - 其他/其他争议 → case_category = "其他"
 - 数字 1-6 → 按顺序对应上述
 
-### 第二步：提取路径
+### 第二步：结束（立即执行）
 
-**重要：只有当 case_category_extracted = true 时才能进入第二步**
-
-**检查用户输入是否包含路由选择**：
-- 如果用户输入包含"A"、"律师"、"视频" → route = "video_call"
-- 如果用户输入包含"B"、"自由描述"、"我描述"、"我说" → route = "free_description"
-- 如果用户输入包含"C"、"交互"、"问答"、"清单"、"系统" → route = "interactive_qa"
-
-**如果提取到了 route（用户输入包含路由关键词）**：
-1. 直接输出"好的，您选择了[B)自由描述案情]。正在进入下一步..."
-2. 设置 route_extracted = true
-3. **立即执行第三步（调用 proceed_to_next_step）**
-
-**如果用户输入不包含路由关键词**：
-→ 输出"请选择处理方式：A)转律师视频 B)自由描述案情 C)交互式问答"
-
-设置 route_extracted = true
-
-### 第三步：结束（必须立即执行）
-
-**重要：只有当 route_extracted = true 时才能执行此步**
+**重要：只有当 case_category_extracted = true 时才能执行此步**
 
 调用 proceed_to_next_step，携带：
-step_answers={"case_category": "[已提取的案由]", "route": "[已提取的路径]"}
+step_answers={"case_category": "[已提取的案由]"}
 
 ## 禁止事项（违反则对话顺序混乱）
-- 如果"案由分类"显示"尚未确定"，必须先提取案由，不能直接展示A/B/C选项
-- case_category_extracted=false 时，禁止展示 A/B/C 路径选项
-- route_extracted=true 后，禁止再询问案由或展示案由选项
-- proceed_to_next_step 必须携带 step_answers 参数，其中包含 case_category 和 route
+- case_category_extracted=false 时，禁止进入下一步
+- proceed_to_next_step 必须携带 step_answers 参数，其中包含 case_category
+- 智能体不询问入口路径选择：该逻辑由前端处理
 """,
 
-    "step3_common": """## 本步任务：收集用户信息后进入下一步
+    "step3_common": """## 本步任务：收集用户基本信息，进入下一步
 
-你需要收集用户的基本信息，然后调用 proceed_to_next_step 进入下一步。
+你需要通过对话收集用户的基本信息。可使用追问工具询问缺失项，但每次只问一个关键问题。
 
-## 收集的信息（从中提取）
-- 就业状态（在职/离职/待岗）
-- 劳动合同签订情况
-- 月工资
-- 工资发放方式
-- 社保缴纳情况
-- 工作岗位
-- 入职时间
-- 每周工作时间
-- 涉及诉求
-- 涉及金额
-- 期望结果
+## 必收集的信息（共11项）
 
-## 你的行为规则
+| # | 字段名 | 说明 |
+|---|--------|------|
+| 1 | employment_status | 就业状态：在职/离职/待岗 |
+| 2 | contract_status | 劳动合同签订情况 |
+| 3 | monthly_salary | 月工资 |
+| 4 | salary_payment_method | 工资发放方式 |
+| 5 | social_security | 社保缴纳情况 |
+| 6 | job_position | 工作岗位 |
+| 7 | entry_date | 入职时间 |
+| 8 | weekly_hours | 每周工作时间 |
+| 9 | claims | 涉及诉求（可多选） |
+| 10 | amount_involved | 涉及金额 |
+| 11 | expected_result | 期望结果 |
 
-**当用户回答问题时**：
-1. 简短确认用户的回答
-2. 直接调用 proceed_to_next_step，step_answers 包含所有收集到的信息
+## 信息缺口检测（每次回复前必须执行）
 
-**当用户说"跳过"或"跳过剩余问题"时**：
-1. 调用 proceed_to_next_step，step_answers 包含已收集的信息
+从用户输入和上下文提取已收集的字段，与上表对比：
 
-**禁止**：
-- 不要一次问多个问题
-- 不要用其他工具追问
-- 不要继续生成文字直到用户不回复
+**如果存在缺失字段** → 进入追问模式（见下方）
+**如果11项全部收集完毕，或用户说"够了"/"跳过"/"进入下一步"** → 调用 proceed_to_next_step
+**如果用户明确要求结束当前步骤** → 调用 proceed_to_next_step
 
-## 重要：每次回复都必须调用 proceed_to_next_step
-用户任何回复（包括"跳过"）都意味着当前信息收集结束，应该立即调用 proceed_to_next_step。
+## 追问模式规则
+
+**什么时候追问**：
+- 有缺失字段时，用适当工具询问缺失项
+
+**用什么工具问**（每次只用一个）：
+- select_option：多选一（如就业状态、合同签订情况）
+- text_input：自由文本（如工作岗位）
+- date_picker：日期（如入职时间）
+- number_input：数字（如月工资、每周工时）
+
+**禁止事项**：
+- 不要一次追问多个缺失项（每次只问1个）
+- 不要重复询问已确认的字段
+
+## proceed_to_next_step 调用规则
+
+调用时 step_answers 必须包含：
+- 所有已收集的字段（未收集的字段 value 置为 null）
+- case_category 字段（如果能从内容推断则填入，否则 null）
+
+**示例**：
+```json
+{
+  "employment_status": "离职",
+  "contract_status": "已签订",
+  "monthly_salary": "8000",
+  "salary_payment_method": "银行转账",
+  "social_security": "已缴纳",
+  "job_position": "外卖骑手",
+  "entry_date": "2023-01-15",
+  "weekly_hours": "40",
+  "claims": "欠薪,经济补偿金",
+  "amount_involved": "24000",
+  "expected_result": "拿回工资和赔偿金",
+  "case_category": "欠薪"
+}
+```
 """,
 
     "step4_special": """## 本步任务：案由特殊问题追问
@@ -499,9 +513,6 @@ def proceed_to_next_step(
         case_category = step_answers.get("case_category")
         if case_category:
             updates["case_category"] = case_category
-        route = step_answers.get("route")
-        if route == "video_call":
-            updates["case_category"] = "__VIDEO_CALL__"
 
     if current_step_name == "step3_common":
         case_category = step_answers.get("case_category")
@@ -509,10 +520,23 @@ def proceed_to_next_step(
             updates["case_category"] = case_category
 
     # 路由目标：下一个 step node 的名字
+    # Command.update 是 dict，messages 字段包含 ToolMessage
     if target_step_num > len(STEP_NAMES):
-        return Command(goto=END, update=updates)
+        tool_msg = ToolMessage(
+            content="已推进到结束",
+            tool_call_id=runtime.tool_call_id,
+        )
+        _updates = dict(updates)
+        _updates["messages"] = [tool_msg]
+        return Command(goto=END, update=_updates)
     next_step_name = STEP_NAMES[target_step_num - 1]
-    return Command(goto=next_step_name, update=updates)
+    tool_msg = ToolMessage(
+        content=f"已推进到下一步: {next_step_name}",
+        tool_call_id=runtime.tool_call_id,
+    )
+    _updates = dict(updates)
+    _updates["messages"] = [tool_msg]
+    return Command(goto=next_step_name, update=_updates)
 
 
 @tool
@@ -535,7 +559,13 @@ def back_to_previous_step(
         "dirty_steps": existing_dirty,
         "last_updated": datetime.now().isoformat(),
     }
-    return Command(goto=step_name, update=updates)
+    tool_msg = ToolMessage(
+        content=f"返回步骤: {step_name}",
+        tool_call_id=runtime.tool_call_id,
+    )
+    _updates = dict(updates)
+    _updates["messages"] = [tool_msg]
+    return Command(goto=step_name, update=_updates)
 
 
 @tool
@@ -918,170 +948,66 @@ def build_step_system_prompt(step_name: str, state: dict) -> str:
 
 
 # ============================================================================
-# Step Node 构建（使用 @tool + bind_tools）
+# Step Agent 构建（使用 create_agent 子图 + name 参数）
 # ============================================================================
 
-def _build_step_node(step_name: str):
-    """
-    为指定步骤构建一个 node 函数。
-    使用 @tool 装饰的工具 + model.bind_tools() 循环处理。
-    """
-    tools = STEP_TOOL_SETS.get(step_name, STEP_TOOL_SETS["step2_initial"])
-    tools_by_name = {t.name: t for t in tools}
-    # Force tool calling: model must invoke a tool on every call
-    # "any" = model will always call at least one tool (preferred for navigation steps)
-    # For step3_common, step4_special, step5_qualification this is critical
-    force_tool_steps = {"step2_initial", "step3_common", "step4_special", "step5_qualification"}
-    tool_choice = "any" if step_name in force_tool_steps else None
-    bound_model = model.bind_tools(tools, tool_choice=tool_choice)
+# Agent 子图缓存（每个 step 一个实例）
+_step_agents: Dict[str, Any] = {}
 
-    def node(state: ConsultationState) -> Dict:
-        # 交互模式：检查是否从 interrupt 恢复（用户已输入新消息）
+
+def _get_step_agent(step_name: str):
+    """获取或创建指定步骤的 agent 子图（带 name 标识）"""
+    if step_name in _step_agents:
+        return _step_agents[step_name]
+
+    tools = STEP_TOOL_SETS.get(step_name, STEP_TOOL_SETS["step2_initial"])
+    system_prompt = build_step_system_prompt(step_name, {})
+
+    agent = create_agent(
+        model,
+        tools=tools,
+        system_prompt=system_prompt,
+        name=step_name,  # Agent 级别名称标识
+    )
+    _step_agents[step_name] = agent
+    return agent
+
+
+def _step_node_wrapper(step_name: str):
+    """
+    包装函数：调用 create_agent 子图。
+    - 动态 system prompt 通过 agent.invoke() 的 config传入
+    - 工具返回 Command(goto=..., graph=Command.PARENT) 由 LangGraph 自动处理路由
+    """
+    agent = _get_step_agent(step_name)
+
+    def wrapper(state: ConsultationState) -> Command | Dict:
+        # 交互模式：检查是否从 interrupt 恢复
         resume_input = state.get("__resume_input__")
         if resume_input:
-            # 从 interrupt 恢复：用户输入了消息，追加到消息列表
             state["messages"].append(HumanMessage(content=resume_input, type="human"))
             state.pop("__resume_input__", None)
 
-        # 1. 自动加载证据清单（step6 首次进入时）
-        return_dict: Dict[str, Any] = {}
-        if step_name == "step6_evidence" and not state.get("evidence_items"):
-            case_category = state.get("case_category")
-            if case_category and case_category not in ("__VIDEO_CALL__",):
-                items = get_evidence_checklist(case_category)
-                if items:
-                    return_dict["evidence_items"] = items
+        # 动态 system prompt
+        dynamic_prompt = build_step_system_prompt(step_name, state)
 
-        # 2. 动态构建 system prompt
-        system_prompt = build_step_system_prompt(step_name, state)
+        # 调用 agent 子图
+        # - agent.invoke() 返回 dict（agent自己的状态）
+        # - 如果工具返回 Command(goto=..., graph=Command.PARENT)，LangGraph 会将其
+        #   作为 node 输出，用于父图的路由
+        result = agent.invoke(
+            {"messages": state.get("messages", [])},
+            config={
+                "configurable": {"name": step_name},
+                "system_message": dynamic_prompt,
+            },
+        )
 
-        # 3. 构造消息历史：SystemMessage(prompt) + 全部消息历史
-        # 注意：不修剪消息，避免切断 tool_call 和 ToolMessage 的配对
-        all_messages: List[Any] = [SystemMessage(content=system_prompt)] + list(state.get("messages", []))
+        # agent.invoke() 返回 dict，包含更新后的 messages
+        # LangGraph 的 node 返回值会作为边的输入，Command 对象会触发路由跳转
+        return result
 
-        # 4. 单次 LLM 调用
-        ai_msg = bound_model.invoke(all_messages)
-        all_messages.append(ai_msg)
-
-        tool_calls = ai_msg.tool_calls if hasattr(ai_msg, 'tool_calls') else []
-
-        # 5. 导航工具调用 → 直接跳转，不 interrupt
-        if tool_calls:
-            for call in tool_calls:
-                tool_name = call.get("name", "")
-                tool_args = call.get("args", {})
-                matched = tools_by_name.get(tool_name)
-                if not matched:
-                    continue
-
-                # Lightweight wrapper so tools can read/write state via runtime.state
-                class _Runtime:
-                    def __init__(self, st):
-                        self.state = st
-                result = matched.func(runtime=_Runtime(state), **tool_args)
-
-                if isinstance(result, Command):
-                    goto = result.goto if hasattr(result, "goto") else END
-                    update = result.update if hasattr(result, "update") else {}
-
-                    tool_msg = ToolMessage(
-                        content=str(result) if result else "",
-                        tool_call_id=call.get("id", ""),
-                    )
-                    all_messages.append(tool_msg)
-
-                    final_dict: Dict[str, Any] = {
-                        "messages": all_messages,
-                        "tool_results": [{
-                            "id": call.get("id", ""),
-                            "name": tool_name,
-                            "result": str(result) if result else "",
-                        }],
-                    }
-                    final_dict.update(update)
-                    if return_dict.get("evidence_items") and "evidence_items" not in final_dict:
-                        final_dict["evidence_items"] = return_dict["evidence_items"]
-
-                    return Command(goto=goto, update=final_dict)
-                else:
-                    tool_msg = ToolMessage(
-                        content=str(result),
-                        tool_call_id=call.get("id", ""),
-                    )
-                    all_messages.append(tool_msg)
-
-        # 6. 无导航工具调用 → 检查是否需要自动跳过
-        # step2_initial: 用户输入案由+路由选择后，LLM 只生成文字不调用工具
-        #   → 解析案由和路由，直接跳到 step3_common
-        # step3_common/step4_special: 用户输入后 LLM 只生成文字（无工具调用）
-        #   → 自动跳下一步（保留已收集的信息）
-        last_msg_type = all_messages[-1].type if all_messages else None
-        if step_name == "step2_initial" and not tool_calls and last_msg_type == "ai":
-            user_msgs = [m for m in all_messages if hasattr(m, "type") and m.type in ("human", "user")]
-            if len(user_msgs) >= 2:
-                # 解析案由和路由
-                case_raw = user_msgs[-2].content.strip()
-                route_raw = user_msgs[-1].content.strip().upper()
-                case_map = {"欠薪": "欠薪", "开除": "开除", "工伤": "工伤",
-                            "调岗": "调岗", "社保": "社保", "其他": "其他"}
-                # 只有在case_raw是已知案由时才触发auto_skip，避免把无意义输入当案由
-                if case_raw not in case_map:
-                    # 不是有效案由，不触发auto_skip，让LLM继续处理
-                    pass
-                else:
-                    case_category = case_map[case_raw]
-                    route_map = {"B": "self_describe", "2": "self_describe",
-                                 "C": "interactive", "3": "interactive",
-                                 "A": "video_call", "1": "video_call"}
-                    route = route_map.get(route_raw)
-                    step_answers = {"case_category": case_category}
-                    if route:
-                        step_answers["route"] = route
-                    updates: Dict[str, Any] = {
-                        "case_category": "__VIDEO_CALL__" if route == "video_call" else case_category,
-                        "current_step": 3,
-                        "completed_steps": {1, 2},
-                        "step_data": {"step2_initial": StepData(answers=step_answers, status="completed",
-                                                                 completed_at=datetime.now().isoformat())},
-                        "dirty_steps": set(),
-                        "last_updated": datetime.now().isoformat(),
-                    }
-                    final_dict: Dict[str, Any] = {"messages": all_messages}
-                    final_dict.update(return_dict)
-                    return Command(goto="step3_common", update=updates)
-
-        if step_name in ("step3_common", "step4_special") and not tool_calls and last_msg_type == "ai":
-            user_msgs = [m for m in all_messages if hasattr(m, "type") and m.type in ("human", "user")]
-            last_content = user_msgs[-1].content.strip() if user_msgs else ""
-            existing = {}
-            sd = state.get("step_data", {})
-            if step_name in sd:
-                existing = dict(sd[step_name].get("answers", {}))
-            if last_content:
-                existing["最后回答"] = last_content
-            cur_num = STEP_NAMES.index(step_name) + 1
-            nxt_num = cur_num + 1
-            nxt_name = STEP_NAMES[nxt_num - 1] if nxt_num <= len(STEP_NAMES) else END
-            sd_copy = (state.get("step_data", {}) or {}).copy()
-            sd_copy[step_name] = StepData(answers=existing, status="completed",
-                                           completed_at=datetime.now().isoformat())
-            updates = {
-                "step_data": sd_copy,
-                "current_step": nxt_num,
-                "completed_steps": set(state.get("completed_steps", set()) or set()) | {cur_num},
-                "dirty_steps": set(),
-                "last_updated": datetime.now().isoformat(),
-            }
-            final_dict = {"messages": all_messages}
-            final_dict.update(return_dict)
-            return Command(goto=nxt_name, update=updates)
-
-        # 7. 无导航工具调用 → 返回普通字典，让条件边决定路由
-        final_dict: Dict[str, Any] = {"messages": all_messages}
-        final_dict.update(return_dict)
-        return final_dict
-
-    return node
+    return wrapper
 
 
 # ============================================================================
@@ -1125,10 +1051,10 @@ def create_consultation_graph():
     """
     构建九步咨询系统 StateGraph。
 
-    架构（Phase 5 重构 - Handoffs 模式）：
-    - 每步 node 用 @tool + model.bind_tools() 处理工具调用
-    - 节点返回普通 dict（LLM 无导航工具）或 Command(goto=next_step)（导航工具）
-    - 条件边检测最后消息：普通 AIMessage → END（等待用户）；导航工具由 Command 处理
+    架构（Agentic Handoffs 模式）：
+    - 每个步骤是一个 create_agent 子图，带 name 参数标识
+    - 导航工具返回 Command(goto=..., graph=Command.PARENT) 控制父图路由
+    - 条件边检测最后消息：普通 AIMessage → END（等待用户）
     - 用户输入后重新从 START 进入，走到对应步骤节点继续
     """
     workflow = StateGraph(
@@ -1136,9 +1062,9 @@ def create_consultation_graph():
         input_schema=ConsultationInput,
     )
 
-    # 添加所有步骤节点
+    # 添加所有步骤节点（使用 create_agent 子图）
     for step_name in STEP_NAMES:
-        workflow.add_node(step_name, _build_step_node(step_name))
+        workflow.add_node(step_name, _step_node_wrapper(step_name))
 
     # 起点 → 当前步骤（根据 current_step 恢复检查点）
     workflow.add_conditional_edges(
@@ -1147,7 +1073,7 @@ def create_consultation_graph():
         {name: name for name in STEP_NAMES},
     )
 
-    # 每个步骤后加条件边：LLM 无导航工具调用时暂停，等待用户输入
+    # 每个步骤后加条件边：无导航工具调用时暂停，等待用户输入
     for step_name in STEP_NAMES:
         workflow.add_conditional_edges(
             step_name,

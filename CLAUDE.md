@@ -50,6 +50,36 @@
 - `OPENAI_API_KEY` - API 密钥
 - `MODEL_NAME` - 模型名称（默认: Doubao-DeepSeek-V3）
 
+## 智能体架构边界（强制约定）
+
+### 入口路径职责划分
+
+| 层次 | 职责 | 实现位置 |
+|------|------|----------|
+| **前端层** | 入口路由、UI渲染、按钮点击分发 | React组件 |
+| **智能体层** | 内容理解、案由提取、权益生成、文书撰写 | LangGraph |
+
+**关键约束**：
+- 智能体**不询问**用户选择哪个入口路径（A/B/C）
+- 前端已通过按钮点击做路由，智能体只接收已路由的内容
+- "自述案情"和"交互问答"是前端UI差异，智能体**不感知**输入形式
+- 智能体唯一职责：处理用户输入的内容，完成业务逻辑
+
+### 前端-智能体接口约定
+
+前端将所有输入（文字/语音/表单）**统一转化为结构化文本**传给智能体：
+
+```typescript
+interface UserInput {
+  content: string;           // 用户输入的文本
+  inputType: "text" | "voice" | "form";
+  formData?: Record<string, string>;  // 表单数据扁平化
+  currentStep: string;        // 当前步骤（如 "step2_initial"）
+}
+```
+
+智能体通过 `currentStep` 感知进度，通过 `content` 理解内容，**不感知 inputType**。
+
 ## 测试
 `test_local.py` - 使用 `graph.stream()` 直接测试工作流，通过可配置的 `thread_id` 实现对话持久化。使用 `MemorySaver` 检查点。
 
