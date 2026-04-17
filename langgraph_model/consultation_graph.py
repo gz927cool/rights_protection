@@ -454,7 +454,7 @@ def go_to_step(runtime: ToolRuntime, step_name: str, reason: str = "") -> Comman
     if reason:
         msg += f" 原因：{reason}"
     msg += " 后续步骤已标记为待更新。"
-    return Command(goto=step_name, update=updates)
+    return Command(goto=step_name, update=updates, graph=Command.PARENT)
 
 
 @tool
@@ -471,8 +471,21 @@ def proceed_to_next_step(
     """
     import json as _json
 
-    current_step_num = runtime.state.get("current_step", 1)
-    current_step_name = STEP_NAMES[current_step_num - 1]
+    # Get current step from the last AIMessage's name attribute
+    # (agent subgraph doesn't have access to parent state's current_step)
+    messages = runtime.state.get("messages", [])
+    current_step_name = None
+    for msg in reversed(messages):
+        if hasattr(msg, 'name') and msg.name in STEP_NAMES:
+            current_step_name = msg.name
+            break
+
+    if not current_step_name:
+        # Fallback: assume step2_initial
+        current_step_name = STEP_NAMES[0]
+
+    # Map step name to step number: step2_initial=2, step3_common=3, etc.
+    current_step_num = STEP_NAMES.index(current_step_name) + 2
     target_step_num = current_step_num + 1
 
     extra = {}
@@ -500,8 +513,8 @@ def proceed_to_next_step(
     updates: Dict[str, Any] = {
         "step_data": step_data,
         "current_step": target_step_num,
-        "completed_steps": set(runtime.state.get("completed_steps", set()) or set()) | {current_step_num},
-        "dirty_steps": set(runtime.state.get("dirty_steps", set()) or set()) | get_dirty_range(target_step_num),
+        "completed_steps": {current_step_num},
+        "dirty_steps": get_dirty_range(target_step_num),
         "last_updated": datetime.now().isoformat(),
     }
 
@@ -520,23 +533,11 @@ def proceed_to_next_step(
             updates["case_category"] = case_category
 
     # 路由目标：下一个 step node 的名字
-    # Command.update 是 dict，messages 字段包含 ToolMessage
-    if target_step_num > len(STEP_NAMES):
-        tool_msg = ToolMessage(
-            content="已推进到结束",
-            tool_call_id=runtime.tool_call_id,
-        )
-        _updates = dict(updates)
-        _updates["messages"] = [tool_msg]
-        return Command(goto=END, update=_updates)
-    next_step_name = STEP_NAMES[target_step_num - 1]
-    tool_msg = ToolMessage(
-        content=f"已推进到下一步: {next_step_name}",
-        tool_call_id=runtime.tool_call_id,
-    )
-    _updates = dict(updates)
-    _updates["messages"] = [tool_msg]
-    return Command(goto=next_step_name, update=_updates)
+    # ToolMessage 由 agent 子图自动处理，不需要在 Command.update 中包含 messages
+    if target_step_num > len(STEP_NAMES) + 1:
+        return Command(goto=END, update=updates, graph=Command.PARENT)
+    next_step_name = STEP_NAMES[target_step_num - 2]
+    return Command(goto=next_step_name, update=updates, graph=Command.PARENT)
 
 
 @tool
@@ -559,13 +560,8 @@ def back_to_previous_step(
         "dirty_steps": existing_dirty,
         "last_updated": datetime.now().isoformat(),
     }
-    tool_msg = ToolMessage(
-        content=f"返回步骤: {step_name}",
-        tool_call_id=runtime.tool_call_id,
-    )
-    _updates = dict(updates)
-    _updates["messages"] = [tool_msg]
-    return Command(goto=step_name, update=_updates)
+    # ToolMessage 由 agent 子图自动处理
+    return Command(goto=step_name, update=updates, graph=Command.PARENT)
 
 
 @tool
@@ -982,30 +978,45 @@ def _step_node_wrapper(step_name: str):
     agent = _get_step_agent(step_name)
 
     def wrapper(state: ConsultationState) -> Command | Dict:
-        # 交互模式：检查是否从 interrupt 恢复
         resume_input = state.get("__resume_input__")
-        if resume_input:
-            state["messages"].append(HumanMessage(content=resume_input, type="human"))
-            state.pop("__resume_input__", None)
+        messages_to_send = list(state.get("messages", []))
 
-        # 动态 system prompt
+        if resume_input:
+            messages_to_send.append(HumanMessage(content=resume_input, type="human"))
+
         dynamic_prompt = build_step_system_prompt(step_name, state)
 
-        # 调用 agent 子图
-        # - agent.invoke() 返回 dict（agent自己的状态）
-        # - 如果工具返回 Command(goto=..., graph=Command.PARENT)，LangGraph 会将其
-        #   作为 node 输出，用于父图的路由
-        result = agent.invoke(
-            {"messages": state.get("messages", [])},
-            config={
-                "configurable": {"name": step_name},
-                "system_message": dynamic_prompt,
-            },
-        )
+        # Track message IDs we already have
+        existing_ids = {msg.id for msg in messages_to_send if hasattr(msg, 'id')}
+        collected_messages = []
+        command_to_return = None
 
-        # agent.invoke() 返回 dict，包含更新后的 messages
-        # LangGraph 的 node 返回值会作为边的输入，Command 对象会触发路由跳转
-        return result
+        try:
+            for chunk in agent.stream(
+                {"messages": messages_to_send},
+                config={
+                    "configurable": {"name": step_name},
+                    "system_message": dynamic_prompt,
+                },
+                stream_mode="updates"
+            ):
+                for node_name, node_output in chunk.items():
+                    if isinstance(node_output, dict) and "messages" in node_output:
+                        collected_messages.extend(node_output["messages"])
+        except ParentCommand as e:
+            command_to_return = e.args[0]
+
+        # Filter out messages we already had (by ID)
+        new_messages = [msg for msg in collected_messages
+                       if not hasattr(msg, 'id') or msg.id not in existing_ids]
+
+        if command_to_return:
+            if new_messages:
+                command_to_return.update["messages"] = new_messages
+            return command_to_return
+
+        return {"messages": new_messages}
+
 
     return wrapper
 
@@ -1014,16 +1025,54 @@ def _step_node_wrapper(step_name: str):
 # StateGraph 构建
 # ============================================================================
 
+def _initialize_state(state: ConsultationState) -> Dict[str, Any]:
+    """
+    初始化状态节点：确保所有必需字段都有默认值。
+    只在首次调用时初始化，后续调用保持现有值。
+    """
+    updates = {}
+
+    # 初始化 current_step（如果未设置或为 0）
+    # step2_initial is step 2, so default to 2
+    if state.get("current_step") is None or state.get("current_step") == 0:
+        updates["current_step"] = 2
+
+    # 初始化其他必需字段
+    if state.get("completed_steps") is None:
+        updates["completed_steps"] = set()
+
+    if state.get("step_data") is None:
+        updates["step_data"] = {}
+
+    if state.get("dirty_steps") is None:
+        updates["dirty_steps"] = set()
+
+    if state.get("evidence_items") is None:
+        updates["evidence_items"] = []
+
+    if state.get("evidence_files") is None:
+        updates["evidence_files"] = {}
+
+    return updates
+
+
 def _route_from_start(state: ConsultationState) -> str:
     """
     入口路由：根据 current_step 恢复到对应步骤节点。
     每次新的 invoke 从 START 进入，由这里路由到正确的步骤。
+
+    Mapping: current_step matches the step number in the name
+    - current_step=2 → step2_initial
+    - current_step=3 → step3_common
+    - etc.
     """
-    current = state.get("current_step", 1)
-    msg_count = len(state.get("messages", []))
-    if 1 <= current <= len(STEP_NAMES):
-        return STEP_NAMES[current - 1]
-    return STEP_NAMES[0]  # 默认从 step1 开始
+    current = state.get("current_step", 2)
+    if current is None or current == 0:
+        current = 2
+    # Map current_step to STEP_NAMES index: step2_initial is at index 0, so offset by 2
+    if 2 <= current <= len(STEP_NAMES) + 1:
+        return STEP_NAMES[current - 2]
+    return STEP_NAMES[0]  # 默认从 step2_initial 开始
 
 
 def _route_after_step(state: ConsultationState) -> str:
@@ -1062,13 +1111,19 @@ def create_consultation_graph():
         input_schema=ConsultationInput,
     )
 
+    # 添加状态初始化节点
+    workflow.add_node("_init", _initialize_state)
+
     # 添加所有步骤节点（使用 create_agent 子图）
     for step_name in STEP_NAMES:
         workflow.add_node(step_name, _step_node_wrapper(step_name))
 
-    # 起点 → 当前步骤（根据 current_step 恢复检查点）
+    # 起点 → 初始化节点
+    workflow.add_edge(START, "_init")
+
+    # 初始化节点 → 当前步骤（根据 current_step 恢复检查点）
     workflow.add_conditional_edges(
-        START,
+        "_init",
         _route_from_start,
         {name: name for name in STEP_NAMES},
     )

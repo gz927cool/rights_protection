@@ -213,7 +213,7 @@ class ConsultationState(TypedDict):
     消息累积 + 九步流程追踪 + 案件核心数据 + 证据体系 + 文书
     """
     # --- 消息累积（不变）---
-    messages: Annotated[List[Any], _replace_list]
+    messages: Annotated[List[Any], messages_add]
 
     # --- 九步核心 ---
     current_step: Annotated[int, _last_writer]  # 1-10, current step
@@ -247,7 +247,7 @@ class ConsultationState(TypedDict):
 
 class ConsultationInput(TypedDict):
     """九步咨询系统输入状态（初始状态）"""
-    messages: Annotated[List[Any], _replace_list]
+    messages: Annotated[List[Any], messages_add]
     session_id: str
     member_id: Optional[str] = None
     resume_token: Optional[str] = None

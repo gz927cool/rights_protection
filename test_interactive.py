@@ -20,9 +20,11 @@ while True:
         break
 
     result = graph.invoke({"messages": [HumanMessage(content=user_input)]}, config=config)
+    for msg in result["messages"]:
+        msg.pretty_print()
 
-    msgs = result.get("messages", [])
-    for msg in reversed(msgs):
-        if hasattr(msg, "content") and msg.content and not str(msg.content).startswith("Command"):
-            print(f"AI: {msg.content}\n")
-            break
+    # msgs = result.get("messages", [])
+    # for msg in reversed(msgs):
+    #     if hasattr(msg, "content") and msg.content and not str(msg.content).startswith("Command"):
+    #         print(f"AI: {msg.content}\n")
+    #         break
