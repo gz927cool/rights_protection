@@ -36,12 +36,6 @@ from langgraph_model.consultation_state import (
     evaluate_evidence_completeness,
 )
 from langgraph_model.prompts import STEP_PROMPTS,GLOBAL_CONTEXT
-from langgraph_model.tools import (
-    select_option,
-    text_input,
-    date_picker,
-    number_input,
-)
 
 # ============================================================================
 # LLM 模型
@@ -254,17 +248,9 @@ STEP_TOOL_SETS: Dict[str, List[Any]] = {
         proceed_to_next_step,
         go_to_step,
         request_missing_info,
-        select_option,
-        text_input,
-        date_picker,
-        number_input,
     ],
     "step3_common": [
         proceed_to_next_step,
-        select_option,
-        text_input,
-        date_picker,
-        number_input,
     ],
     "step4_special": [
         proceed_to_next_step,
@@ -322,11 +308,11 @@ def build_step_system_prompt(step_name: str, state: dict) -> str:
     context_lines = [
         "",
         "=" * 40,
-        "【当前状态 - 请结合以下信息生成回复】",
-        f"当前步骤：{current_step} ({STEP_DISPLAY_NAMES.get(step_name, step_name)})",
-        f"会话ID：{session_id}",
-        f"案由分类：{case_category or '尚未确定'}",
-        f"已完成步骤：{sorted(completed_steps) if completed_steps else '无'}",
+        # "【当前状态 - 请结合以下信息生成回复】",
+        # f"当前步骤：{current_step} ({STEP_DISPLAY_NAMES.get(step_name, step_name)})",
+        # f"会话ID：{session_id}",
+        # f"案由分类：{case_category or '尚未确定'}",
+        # f"已完成步骤：{sorted(completed_steps) if completed_steps else '无'}",
     ]
 
     step_data = state.get("step_data", {})
@@ -478,65 +464,21 @@ def _step_node_wrapper(step_name: str):
 # ============================================================================
 # StateGraph 构建
 # ============================================================================
-
-def _initialize_state(state: ConsultationState) -> Dict[str, Any]:
-    """
-    初始化状态节点：确保所有必需字段都有默认值。
-    只在首次调用时初始化，后续调用保持现有值。
-    """
-    updates = {}
-
-    # 初始化 current_step（如果未设置或为 0）
-    # step2_initial is step 2, so default to 2
-    if state.get("current_step") is None or state.get("current_step") == 0:
-        updates["current_step"] = 2
-
-    # 初始化其他必需字段
-    if state.get("completed_steps") is None:
-        updates["completed_steps"] = set()
-
-    if state.get("step_data") is None:
-        updates["step_data"] = {}
-
-    if state.get("dirty_steps") is None:
-        updates["dirty_steps"] = set()
-
-    if state.get("evidence_items") is None:
-        updates["evidence_items"] = []
-
-    if state.get("evidence_files") is None:
-        updates["evidence_files"] = {}
-
-    return updates
+def route_initial(
+    state: ConsultationState,
+) -> Literal["step2_initial", 
+            "step3_common",   
+            "step4_special", 
+            "step5_qualification",
+            "step6_evidence",
+            "step7_risk",
+            "step8_documents",
+            "step9_roadmap",
+            "step10_review"]:
+    return state.get("active_agent") or "step2_initial"
 
 
-def _route_from_start(state: ConsultationState) -> str:
-    """
-    入口路由：根据 current_step 恢复到对应步骤节点。
-    每次新的 invoke 从 START 进入，由这里路由到正确的步骤。
-
-    Mapping: current_step matches the step number in the name
-    - current_step=2 → step2_initial
-    - current_step=3 → step3_common
-    - etc.
-    """
-    current = state.get("current_step", 2)
-    if current is None or current == 0:
-        current = 2
-
-    # 确保 current 是整数类型
-    try:
-        current = int(current)
-    except (ValueError, TypeError):
-        current = 2
-
-    # Map current_step to STEP_NAMES index: step2_initial is at index 0, so offset by 2
-    if 2 <= current <= len(STEP_NAMES) + 1:
-        return STEP_NAMES[current - 2]
-    return STEP_NAMES[0]  # 默认从 step2_initial 开始
-
-
-def _route_after_step(state: ConsultationState) -> str:
+def route_after_agent(state: ConsultationState) -> str:
     """
     交互模式路由：每次 step node 执行后检查是否结束本轮对话。
     
@@ -546,14 +488,13 @@ def _route_after_step(state: ConsultationState) -> str:
     """
     messages = state.get("messages", [])
     if messages:
-        last = messages[-1]
-        if hasattr(last, "tool_calls") and last.tool_calls:
+        last_msg = messages[-1]
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
             # LLM 调用了工具，导航工具会在 Command 中指定目标
             # 条件边这里返回什么无所谓，Command(goto=...) 会覆盖
             return END
-        if hasattr(last, "type") and last.type == "ai":
-            # LLM 直接回复（无工具调用）→ 暂停等待用户输入
-            return END
+        if isinstance(last_msg, AIMessage) and not last_msg.tool_calls:
+            return "__end__"
     active = state.get("active_agent")
     return active if active else END
 
@@ -574,27 +515,17 @@ def create_consultation_graph():
     )
 
     # 添加状态初始化节点
-    workflow.add_node("_init", _initialize_state)
+    workflow.add_conditional_edges(START, route_initial, STEP_NAMES)
 
     # 添加所有步骤节点（使用 create_agent 子图）
     for step_name in STEP_NAMES:
         workflow.add_node(step_name, _step_node_wrapper(step_name))
 
-    # 起点 → 初始化节点
-    workflow.add_edge(START, "_init")
-
-    # 初始化节点 → 当前步骤（根据 current_step 恢复检查点）
-    workflow.add_conditional_edges(
-        "_init",
-        _route_from_start,
-        {name: name for name in STEP_NAMES},
-    )
-
     # 每个步骤后加条件边：无导航工具调用时暂停，等待用户输入
     for step_name in STEP_NAMES:
         workflow.add_conditional_edges(
             step_name,
-            _route_after_step,
+            route_after_agent,
             STEP_NAMES + [END],
         )
 
