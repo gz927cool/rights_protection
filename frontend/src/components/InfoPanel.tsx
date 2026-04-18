@@ -785,6 +785,7 @@ function Step10Review({
 // ============================================================================
 export default function InfoPanel({
   currentStep,
+  currentStepName,
   sessionId: _sessionId,
   caseCategory,
   qualification,
@@ -813,7 +814,7 @@ export default function InfoPanel({
         <div className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-blue-500" />
           <span className="text-sm font-semibold text-gray-800">
-            {stepTitles[currentStep] || "信息面板"}
+            {currentStepName || stepTitles[currentStep] || "信息面板"}
           </span>
           <span className="ml-auto text-xs text-gray-400">
             第{currentStep}步

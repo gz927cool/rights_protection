@@ -336,7 +336,8 @@ def post_chat_stream(message: ChatMessage):
                     continue
 
             # 结束事件
-            yield f"event: done\ndata: {_json.dumps({'current_step': current_step, 'session_id': session_id})}\n\n"
+            step_name = STEP_DISPLAY_NAMES.get(STEP_NAMES[current_step - 1], STEP_NAMES[current_step - 1])
+            yield f"event: done\ndata: {_json.dumps({'current_step': current_step, 'current_step_name': step_name, 'session_id': session_id})}\n\n"
         finally:
             executor.shutdown(wait=False)
 

@@ -10,8 +10,8 @@ function App() {
       <BrowserRouter>
         <Routes>
         <Route path="/" element={<HomePage />} />
-        <Route path="/chat/:sessionId" element={<ChatPage />} />
-        <Route path="/chat" element={<ChatPage />} />
+        <Route path="/chat/:sessionId" element={<ChatPage key={undefined} />} />
+        <Route path="/chat" element={<ChatPage key="home-new" />} />
       </Routes>
       </BrowserRouter>
     </>

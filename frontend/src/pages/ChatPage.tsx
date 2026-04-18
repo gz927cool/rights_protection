@@ -78,9 +78,9 @@ interface RiskItem {
 // =============================================================================
 
 const STEP_LABELS = [
-  { num: 1, label: "模式选择", icon: "🎯" },
-  { num: 2, label: "问题初判", icon: "📋" },
-  { num: 3, label: "信息补全", icon: "📝" },
+  { num: 1, label: "问题初判", icon: "📋" },
+  { num: 2, label: "通用问题", icon: "📝" },
+  { num: 3, label: "特殊问题", icon: "🔍" },
   { num: 4, label: "案件定性", icon: "⚖️" },
   { num: 5, label: "证据攻略", icon: "📁" },
   { num: 6, label: "风险提示", icon: "⚠️" },
@@ -804,10 +804,23 @@ export default function ChatPage() {
                       : msg
                   )
                 )
+                // 更新会话ID
+                const newSessionId = data.session_id && data.session_id !== activeSessionId
+                  ? data.session_id
+                  : activeSessionId
                 if (data.session_id && data.session_id !== activeSessionId) {
                   setActiveSessionId(data.session_id)
                   window.history.replaceState(null, "", `/chat/${data.session_id}`)
                 }
+                // 从后端获取完整会话状态
+                fetch(`/sessions/${newSessionId}`)
+                  .then((r) => r.json())
+                  .then((sessionData) => {
+                    if (sessionData && sessionData.current_step) {
+                      setSessionState(sessionData)
+                    }
+                  })
+                  .catch(console.error)
                 currentEvent = null
               }
             } catch (parseErr) {

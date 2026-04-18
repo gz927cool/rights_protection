@@ -95,10 +95,13 @@ def proceed_to_next_step(
     if not current_step_name:
         current_step_name = STEP_NAMES[0]
 
-    # Map step name to step number: step2_initial=2, step3_common=3, etc.
+    # Map step name to step number: step2_initial=0, step3_common=1, etc.
     current_step_num = STEP_NAMES.index(current_step_name)
     target_step_num = current_step_num + 1
     next_step_name = STEP_NAMES[target_step_num]
+
+    # 当前步骤号（1-9，对应前端显示）
+    current_step_display = current_step_num + 1
 
     transfer_message = ToolMessage(
         content="跳转到下一步",
@@ -107,6 +110,7 @@ def proceed_to_next_step(
     updates = {
         "active_agent": next_step_name,
         "current_step": target_step_num + 1,
+        "completed_steps": {current_step_display},  # 标记当前步骤为已完成
         "messages": [last_ai_message, transfer_message],
     }
     return Command(goto=next_step_name, update=updates, graph=Command.PARENT)
