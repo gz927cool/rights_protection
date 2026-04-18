@@ -82,7 +82,7 @@ def proceed_to_next_step(
 ) -> Command:
     """
     当前步骤完成，携带数据进入下一步。
-    返回 Command 让 LangGraph 路由到下一个 step node。
+    进入下一阶段时必须调用此工具。
     """
     messages = runtime.state.get("messages", [])
     last_ai_message = next(
