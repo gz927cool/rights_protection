@@ -19,12 +19,18 @@ while True:
     if user_input.lower() in ("q", "quit", "退出"):
         break
 
-    result = graph.invoke({"messages": [HumanMessage(content=user_input)]}, config=config)
-    for msg in result["messages"]:
-        msg.pretty_print()
-
-    # msgs = result.get("messages", [])
-    # for msg in reversed(msgs):
-    #     if hasattr(msg, "content") and msg.content and not str(msg.content).startswith("Command"):
-    #         print(f"AI: {msg.content}\n")
-    #         break
+    for part in graph.stream({"messages": [HumanMessage(content=user_input)]}, 
+                            stream_mode="updates",
+                            version="v2",
+                            config=config):
+            # print(part["type"])  # "updates"
+            # print(part["ns"])    # ()
+            # print(part["data"][0])  # {"node_name": {"key": "value"}}
+            if part["type"] == "updates":
+            # UpdatesStreamPart — only the changed keys from each node
+                for node_name, state in part["data"].items():
+                    print(f"Node `{node_name}` updated: {state}")
+            elif part["type"] == "messages":
+                # MessagesStreamPart — (message_chunk, metadata) from LLM calls
+                msg, metadata = part["data"]
+                print(msg.content, end="", flush=True)
