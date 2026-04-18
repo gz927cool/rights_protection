@@ -840,9 +840,43 @@ export default function InfoPanel({
         {currentStep === 10 && <Step10Review onSend={onSendMessage} />}
 
         {currentStep < 2 && (
-          <div className="text-center text-gray-400 py-8">
-            <p className="text-2xl mb-2">👋</p>
-            <p className="text-xs">开始聊天，AI将引导您完成咨询</p>
+          <div className="space-y-4">
+            <div className="bg-gradient-to-br from-blue-50 to-emerald-50 border border-blue-200 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-3xl">⚖️</span>
+                <div>
+                  <h3 className="font-semibold text-gray-800">劳动争议智能咨询系统</h3>
+                  <p className="text-xs text-gray-500">您的AI法律助手</p>
+                </div>
+              </div>
+              <p className="text-sm text-gray-600 leading-relaxed">
+                本系统协助劳动者完整维护自身合法权益，覆盖从咨询、证据收集、风险评估到文书生成的完整维权流程。
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-gray-700">我可以帮您：</p>
+              {[
+                { icon: "💬", text: "分析您的劳动争议类型" },
+                { icon: "📋", text: "梳理应得权益和赔偿金额" },
+                { icon: "📎", text: "指导收集和整理证据材料" },
+                { icon: "⚠️", text: "提示维权过程中的风险点" },
+                { icon: "📄", text: "生成仲裁/调解申请书草稿" },
+                { icon: "🗺️", text: "规划协商→调解→仲裁路线" },
+              ].map((item, i) => (
+                <div key={i} className="flex items-center gap-2 text-sm text-gray-600">
+                  <span>{item.icon}</span>
+                  <span>{item.text}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3">
+              <p className="text-xs text-amber-800">
+                <span className="font-medium">温馨提示：</span>
+                本系统仅供参考，具体法律行动建议咨询专业律师。
+              </p>
+            </div>
           </div>
         )}
       </div>

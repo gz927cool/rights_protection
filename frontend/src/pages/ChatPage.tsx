@@ -314,6 +314,9 @@ const QUICK_CATEGORIES = [
   { label: "其他争议", icon: "❓" },
 ]
 
+// [已屏蔽] 快捷问题类型组件 - 保留代码以便以后恢复
+const _QuickActions = QuickActions;
+void _QuickActions; // eslint-disable-line @typescript-eslint/no-unused-vars
 function QuickActions({ onSelect }: { onSelect: (action: string) => void }) {
 
   return (
@@ -589,9 +592,11 @@ function RichMessageRenderer({ message, onQuickAction }: { message: Message; onQ
       })() : null}
 
       {/* Inline quick actions - clicking category buttons sends the text */}
+      {/* [已屏蔽] 快捷问题类型
       {!message.streaming && !artifactType && onQuickAction && text.length > 30 ? (
         <QuickActions onSelect={onQuickAction} />
       ) : null}
+      */}
     </div>
   )
 }
