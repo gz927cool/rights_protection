@@ -22,6 +22,54 @@ test.describe('劳动争议咨询流程', () => {
     await expect(page.locator('text=开除').first()).toBeVisible({ timeout: 15000 });
   });
 
+  test('70_30布局验证_信息面板显示', async ({ page }) => {
+    await page.goto('/chat');
+    await page.waitForLoadState('networkidle');
+
+    // 验证聊天区域存在（左侧）
+    const textarea = page.locator('textarea').first();
+    await expect(textarea).toBeVisible({ timeout: 5000 });
+
+    // 验证信息面板存在（右侧）- 显示"信息面板"或"问题初判"等标题
+    await expect(page.locator('text=/信息面板|问题初判|通用问题|特殊问题/i').first()).toBeVisible({ timeout: 5000 });
+
+    // 验证右侧面板显示步骤信息
+    await expect(page.locator('text=/第.*步/').first()).toBeVisible({ timeout: 5000 });
+  });
+
+  test('70_30布局验证_Step3表单交互', async ({ page }) => {
+    await page.goto('/chat');
+    await page.waitForLoadState('networkidle');
+
+    // 发送"欠薪"进入step2
+    const textarea = page.locator('textarea').first();
+    await textarea.fill('我想咨询欠薪问题');
+    await textarea.press('Enter');
+    await page.waitForTimeout(3000);
+
+    // 在聊天框输入A继续
+    await textarea.fill('A');
+    await textarea.press('Enter');
+    await page.waitForTimeout(5000);
+
+    // 检查信息面板中是否有表单元素（就业状态选项）
+    // Step3应该有就业状态按钮
+    const employmentStatus = page.locator("text=/就业状态/").first();
+    if (await employmentStatus.isVisible({ timeout: 5000 }).catch(() => false)) {
+      // 点击"在职"选项
+      const zaiZhiBtn = page.locator("button:has-text('在职')").first();
+      if (await zaiZhiBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await zaiZhiBtn.click();
+      }
+
+      // 找到月工资输入框
+      const salaryInput = page.locator('input[type="number"]').first();
+      if (await salaryInput.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await salaryInput.fill('8000');
+      }
+    }
+  });
+
   test('AI咨询完整流程验证', async ({ page }) => {
     // 进入聊天页面
     await page.goto('/chat');

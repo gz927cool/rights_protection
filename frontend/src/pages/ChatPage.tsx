@@ -2,9 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react"
 import { useParams, Link } from "react-router-dom"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import DocumentPreview, { DocumentDraft } from "../components/DocumentPreview"
-import EvidenceForm from "../components/EvidenceForm"
-import RoadmapView from "../components/RoadmapView"
+import InfoPanel, { InfoPanelProps } from "../components/InfoPanel"
 
 // =============================================================================
 // Types
@@ -602,86 +600,6 @@ function RichMessageRenderer({ message, onQuickAction }: { message: Message; onQ
 // Sidebar Panel Component
 // =============================================================================
 
-type PanelType = "evidence" | "document" | "roadmap" | null
-
-function SidebarPanel({
-  type,
-  sessionId,
-  sessionState,
-  onClose,
-}: {
-  type: PanelType
-  sessionId: string
-  sessionState: SessionState | null
-  onClose: () => void
-}) {
-  if (!type) return null
-
-  const panelConfig = {
-    evidence: {
-      title: "证据收集",
-      icon: "📁",
-      color: "emerald",
-    },
-    document: {
-      title: "文书预览",
-      icon: "📄",
-      color: "blue",
-    },
-    roadmap: {
-      title: "维权路线图",
-      icon: "🗺️",
-      color: "amber",
-    },
-  }
-
-  const config = panelConfig[type]
-
-  return (
-    <div className="fixed inset-y-0 right-0 w-full sm:w-96 bg-white shadow-2xl z-50 flex flex-col animate-slide-in">
-      {/* Header */}
-      <div className={cn("px-4 py-3 border-b flex items-center justify-between", THEME.border)}>
-        <div className="flex items-center gap-2">
-          <span className="text-2xl">{config.icon}</span>
-          <h3 className="font-semibold text-gray-800">{config.title}</h3>
-        </div>
-        <button
-          onClick={onClose}
-          className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-          aria-label="关闭"
-        >
-          <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 overflow-y-auto">
-        {type === "evidence" && (
-          <EvidenceForm
-            sessionId={sessionId}
-            caseCategory={sessionState?.case_category || "劳动争议"}
-            evidenceItems={sessionState?.evidence_items || []}
-            onStatusChange={() => {}}
-          />
-        )}
-        {type === "document" && (
-          <div className="p-4">
-            <DocumentPreview
-              document={sessionState?.document_draft as DocumentDraft | null || null}
-              rightsList={(sessionState?.qualification as { rights_list?: RightsItem[] })?.rights_list || []}
-              onRegenerate={() => {}}
-            />
-          </div>
-        )}
-        {type === "roadmap" && (
-          <RoadmapView caseCategory={sessionState?.case_category || "劳动争议"} />
-        )}
-      </div>
-    </div>
-  )
-}
 
 // =============================================================================
 // Loading Indicator
@@ -712,7 +630,6 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false)
   const [sessionState, setSessionState] = useState<SessionState | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [activePanel, setActivePanel] = useState<PanelType>(null)
   const [streamingContent, setStreamingContent] = useState("")
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -746,17 +663,17 @@ export default function ChatPage() {
     inputRef.current?.focus()
   }
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return
+  const handleSendMessage = useCallback(async (content: string) => {
+    if (!content.trim() || loading) return
 
     const userMessage: Message = {
       id: generateId(),
       role: "user",
-      content: input,
+      content,
     }
 
     setMessages((prev) => [...prev, userMessage])
-    const userInput = input
+    const userInput = content
     setInput("")
     setLoading(true)
     setError(null)
@@ -873,10 +790,8 @@ export default function ChatPage() {
                 }
                 currentEvent = null
               } else if (currentEvent === "tool_call_done") {
-                // Tool execution result — could log or handle if needed
                 currentEvent = null
               } else if (currentEvent === "done") {
-                // Mark streaming as complete
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === streamingMessageId
@@ -884,11 +799,6 @@ export default function ChatPage() {
                       : msg
                   )
                 )
-                // Auto-open panel based on step
-                const step = data.current_step
-                if (step === 5) setActivePanel("evidence")
-                else if (step === 7) setActivePanel("document")
-                else if (step === 8) setActivePanel("roadmap")
                 if (data.session_id && data.session_id !== activeSessionId) {
                   setActiveSessionId(data.session_id)
                   window.history.replaceState(null, "", `/chat/${data.session_id}`)
@@ -938,16 +848,27 @@ export default function ChatPage() {
       setStreamingContent("")
       inputRef.current?.focus()
     }
+  }, [activeSessionId, loading])
+
+  const handleSendFile = useCallback(async (fileContent: string, filename: string) => {
+    // Send file content as a user message
+    const content = `[文件上传] ${filename}\n\n文件内容：\n${fileContent.slice(0, 1000)}${fileContent.length > 1000 ? "..." : ""}`
+    await handleSendMessage(content)
+  }, [handleSendMessage])
+
+  const sendMessage = async () => {
+    await handleSendMessage(input)
   }
 
   const currentStep = sessionState?.current_step || 1
   const completedSteps = sessionState?.completed_steps || []
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
-      {/* Header */}
-      <header className={cn("px-4 py-3 flex items-center justify-between shadow-sm", THEME.primary)}>
-        <div className="flex items-center gap-3">
+    <div className="flex h-screen bg-gray-50">
+      {/* Left: Chat Area (70%) */}
+      <div className="flex flex-col flex-1 min-w-0">
+        {/* Header */}
+        <header className={cn("px-4 py-3 flex items-center gap-3 shadow-sm", THEME.primary)}>
           <Link
             to="/"
             className="p-2 hover:bg-blue-700 rounded-lg transition-colors"
@@ -965,54 +886,7 @@ export default function ChatPage() {
               </p>
             )}
           </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {/* Panel toggle buttons */}
-          <button
-            onClick={() => setActivePanel(activePanel === "evidence" ? null : "evidence")}
-            className={cn(
-              "p-2 rounded-lg transition-colors",
-              activePanel === "evidence"
-                ? "bg-white text-emerald-600"
-                : "text-white hover:bg-blue-700"
-            )}
-            title="证据收集"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-          </button>
-          <button
-            onClick={() => setActivePanel(activePanel === "document" ? null : "document")}
-            className={cn(
-              "p-2 rounded-lg transition-colors",
-              activePanel === "document"
-                ? "bg-white text-blue-600"
-                : "text-white hover:bg-blue-700"
-            )}
-            title="文书预览"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-          </button>
-          <button
-            onClick={() => setActivePanel(activePanel === "roadmap" ? null : "roadmap")}
-            className={cn(
-              "p-2 rounded-lg transition-colors",
-              activePanel === "roadmap"
-                ? "bg-white text-amber-600"
-                : "text-white hover:bg-blue-700"
-            )}
-            title="维权路线图"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
-            </svg>
-          </button>
-        </div>
-      </header>
+        </header>
 
       {/* Step Progress */}
       {sessionState && (
@@ -1020,11 +894,7 @@ export default function ChatPage() {
           <StepIndicator
             currentStep={currentStep}
             completedSteps={completedSteps}
-            onStepClick={(step) => {
-              if (step === 5) setActivePanel("evidence")
-              else if (step === 7) setActivePanel("document")
-              else if (step === 8) setActivePanel("roadmap")
-            }}
+            onStepClick={() => {}}
           />
         </div>
       )}
@@ -1152,22 +1022,23 @@ export default function ChatPage() {
           按 Enter 发送，Shift+Enter 换行
         </p>
       </div>
-
-      {/* Sidebar Panel */}
-      <SidebarPanel
-        type={activePanel}
-        sessionId={activeSessionId}
-        sessionState={sessionState}
-        onClose={() => setActivePanel(null)}
-      />
-
-      {/* Panel overlay for mobile */}
-      {activePanel && (
-        <div
-          className="fixed inset-0 bg-black/30 z-40 sm:hidden"
-          onClick={() => setActivePanel(null)}
-        />
-      )}
     </div>
+
+    {/* Right: Info Panel (30%) */}
+    <div className="w-[30%] min-w-[300px] max-w-[400px] border-l border-gray-200">
+      <InfoPanel
+        currentStep={currentStep}
+        currentStepName={sessionState?.current_step_name || ""}
+        sessionId={activeSessionId}
+        caseCategory={sessionState?.case_category}
+        qualification={sessionState?.qualification as InfoPanelProps["qualification"]}
+        riskAssessment={sessionState?.risk_assessment as InfoPanelProps["riskAssessment"]}
+        evidenceItems={sessionState?.evidence_items}
+        documentDraft={sessionState?.document_draft as InfoPanelProps["documentDraft"]}
+        onSendMessage={handleSendMessage}
+        onSendFile={handleSendFile}
+      />
+    </div>
+  </div>
   )
 }
