@@ -100,15 +100,15 @@ def proceed_to_next_step(
     target_step_num = current_step_num + 1
     next_step_name = STEP_NAMES[target_step_num]
 
-
     transfer_message = ToolMessage(
         content="跳转到下一步",
         tool_call_id=runtime.tool_call_id,
     )
-    updates={
-            "active_agent": next_step_name,
-            "messages": [last_ai_message, transfer_message],
-        }
+    updates = {
+        "active_agent": next_step_name,
+        "current_step": target_step_num + 1,
+        "messages": [last_ai_message, transfer_message],
+    }
     return Command(goto=next_step_name, update=updates, graph=Command.PARENT)
 
 
@@ -456,7 +456,9 @@ def _step_node_wrapper(step_name: str):
             state = {**state, "messages": updated_messages}
 
         response = agent.invoke(state)
-        return response
+
+        # Merge agent response with parent state - create_agent only returns messages
+        return {**state, **response}
 
     return wrapper
 

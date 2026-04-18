@@ -154,7 +154,7 @@ def post_chat(message: ChatMessage):
     # 初始化或获取状态
     try:
         existing = graph.get_state(config)
-        if existing is None:
+        if existing is None or not existing.values:
             state = create_initial_state(session_id, message.member_id)
         else:
             state = dict(existing.values) if hasattr(existing, "values") else dict(existing)
@@ -176,7 +176,8 @@ def post_chat(message: ChatMessage):
     ai_message = ""
     finish_reason = "stop"
     for msg in reversed(result.get("messages", [])):
-        if hasattr(msg, "type") and msg.type == "ai":
+        msg_type = getattr(msg, "type", None) or getattr(msg, "name", "")
+        if msg_type == "ai":
             ai_message = msg.content
             finish_reason = msg.response_metadata.get("finish_reason", "stop") if hasattr(msg, "response_metadata") else "stop"
             break
@@ -219,7 +220,7 @@ def post_chat_stream(message: ChatMessage):
     # 初始化或获取状态
     try:
         existing = graph.get_state(config)
-        if existing is None:
+        if existing is None or not existing.values:
             state = create_initial_state(session_id, message.member_id)
         else:
             state = dict(existing.values) if hasattr(existing, "values") else dict(existing)
@@ -241,6 +242,8 @@ def post_chat_stream(message: ChatMessage):
                         **state,
                         "messages": [HumanMessage(content=message.content)],
                     },
+                    stream_mode="messages",
+                    version="v2",
                     config=config,
                 ):
                     q.put(chunk)
@@ -272,56 +275,65 @@ def post_chat_stream(message: ChatMessage):
                     yield f"data: {_json.dumps({'error': chunk['__error']})}\n\n"
                     break
 
-                # chunk = {"step_name": node_output}
-                for step_name, step_result in chunk.items():
-                    # 如果同一个 step 再次出现，说明它在等待用户输入，停止 stream
-                    if prev_step_name == step_name and prev_step_name is not None:
-                        break
+                # v2 format: {"type": "messages", "ns": (), "data": (message_chunk, metadata)}
+                if isinstance(chunk, dict) and chunk.get("type") == "messages":
+                    msg_chunk, metadata = chunk["data"]
 
-                    if isinstance(step_result, dict):
-                        messages = step_result.get("messages", [])
+                    # Filter by node if metadata available
+                    node_name = metadata.get("langgraph_node", "") if metadata else ""
 
-                        # 1) 先发出 tool_results（工具执行完成事件）
-                        tool_results = step_result.get("tool_results", [])
-                        for tr in tool_results:
-                            payload = _json.dumps({
-                                "tool_call_id": tr.get("id", ""),
-                                "result": tr.get("result", ""),
+                    # Handle tool_calls in message chunk
+                    if hasattr(msg_chunk, "tool_calls") and msg_chunk.tool_calls:
+                        for tc in msg_chunk.tool_calls:
+                            tc_payload = _json.dumps({
+                                "name": tc.get("name", ""),
+                                "arguments": tc.get("args", {}),
                             })
-                            yield f"event: tool_call_done\ndata: {payload}\n\n"
+                            yield f"event: tool_calls\ndata: {tc_payload}\n\n"
 
-                        # 2) 处理消息（content + tool_calls）
-                        if len(messages) > last_message_count:
-                            new_messages = messages[last_message_count:]
-                            for msg in new_messages:
-                                if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "content"):
-                                    # 2a) tool_calls 事件（工具调用请求）
-                                    if hasattr(msg, "tool_calls") and msg.tool_calls:
-                                        for tc in msg.tool_calls:
-                                            tc_payload = _json.dumps({
-                                                "name": tc.get("name", ""),
-                                                "arguments": tc.get("args", {}),
-                                            })
-                                            yield f"event: tool_calls\ndata: {tc_payload}\n\n"
-                                    # 2b) content 事件（文本输出）
-                                    if msg.content:
-                                        content_payload = _json.dumps({
-                                            "content": msg.content,
-                                            "role": "assistant",
-                                        })
-                                        yield f"event: content\ndata: {content_payload}\n\n"
-                            last_message_count = len(messages)
+                    # Handle content - skip system, human, and tool messages
+                    if hasattr(msg_chunk, "content") and msg_chunk.content:
+                        msg_type = getattr(msg_chunk, "type", None) or getattr(msg_chunk, "name", "ai")
+                        if msg_type not in ("system", "SystemMessage", "human", "tool"):
+                            content_payload = _json.dumps({
+                                "content": msg_chunk.content,
+                                "role": "assistant",
+                            })
+                            yield f"event: content\ndata: {content_payload}\n\n"
 
-                        # 更新 current_step
-                        if "current_step" in step_result:
-                            current_step = step_result["current_step"]
-
-                    prev_step_name = step_name
+                    prev_step_name = node_name
+                elif isinstance(chunk, dict) and chunk.get("type") == "updates":
+                    # Node state updates - extract current_step
+                    for node_name, node_data in chunk.get("data", {}).items():
+                        if isinstance(node_data, dict) and "current_step" in node_data:
+                            current_step = node_data["current_step"]
                 else:
-                    # Inner loop completed normally, continue to next chunk
+                    # Fallback: try older dict format
+                    for step_name, step_result in chunk.items():
+                        if isinstance(step_result, dict):
+                            messages = step_result.get("messages", [])
+                            if len(messages) > last_message_count:
+                                new_messages = messages[last_message_count:]
+                                for msg in new_messages:
+                                    if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "content"):
+                                        if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                            for tc in msg.tool_calls:
+                                                tc_payload = _json.dumps({
+                                                    "name": tc.get("name", ""),
+                                                    "arguments": tc.get("args", {}),
+                                                })
+                                                yield f"event: tool_calls\ndata: {tc_payload}\n\n"
+                                        if msg.content:
+                                            content_payload = _json.dumps({
+                                                "content": msg.content,
+                                                "role": "assistant",
+                                            })
+                                            yield f"event: content\ndata: {content_payload}\n\n"
+                                last_message_count = len(messages)
+                            if "current_step" in step_result:
+                                current_step = step_result["current_step"]
+                        prev_step_name = step_name
                     continue
-                # Inner loop broke (same step repeated), break outer loop too
-                break
 
             # 结束事件
             yield f"event: done\ndata: {_json.dumps({'current_step': current_step, 'session_id': session_id})}\n\n"
