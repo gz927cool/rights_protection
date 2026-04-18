@@ -293,9 +293,6 @@ def build_step_system_prompt(step_name: str, state: dict) -> str:
     为指定步骤构建完整的 system prompt。
     = 全局上下文 + 步骤特有逻辑 + 当前案件状态
     """
-    global_prompt = GLOBAL_CONTEXT
-    step_prompt = STEP_PROMPTS.get(step_name, "")
-
     current_step = state.get("current_step", 1)
     case_category = state.get("case_category")
     session_id = state.get("session_id", "")
@@ -396,7 +393,7 @@ def build_step_system_prompt(step_name: str, state: dict) -> str:
 
     context_block = "\n".join(context_lines)
 
-    return f"{global_prompt}\n{context_block}\n\n{step_prompt}"
+    return f"\n{context_block}\n\n"
 
 
 # ============================================================================
@@ -437,23 +434,23 @@ def _step_node_wrapper(step_name: str):
     agent = _get_step_agent(step_name)
 
     def wrapper(state: ConsultationState) -> Command | Dict:
-        # 构建动态 system prompt
-        dynamic_prompt = build_step_system_prompt(step_name, state)
+        # # 构建动态 system prompt
+        # dynamic_prompt = build_step_system_prompt(step_name, state)
 
-        # 将动态 prompt 注入到 messages 中
-        messages = state.get("messages", [])
+        # # 将动态 prompt 注入到 messages 中
+        # messages = state.get("messages", [])
 
-        # 如果第一条消息不是 SystemMessage，或者内容不同，则更新
-        if not messages or not isinstance(messages[0], SystemMessage) or messages[0].content != dynamic_prompt:
-            # 创建新的 messages 列表，第一条是动态 system prompt
-            updated_messages = [SystemMessage(content=dynamic_prompt)]
-            # 保留其他消息（跳过旧的 SystemMessage）
-            for msg in messages:
-                if not isinstance(msg, SystemMessage):
-                    updated_messages.append(msg)
+        # # 如果第一条消息不是 SystemMessage，或者内容不同，则更新
+        # if not messages or not isinstance(messages[0], SystemMessage) or messages[0].content != dynamic_prompt:
+        #     # 创建新的 messages 列表，第一条是动态 system prompt
+        #     updated_messages = [SystemMessage(content=dynamic_prompt)]
+        #     # 保留其他消息（跳过旧的 SystemMessage）
+        #     for msg in messages:
+        #         if not isinstance(msg, SystemMessage):
+        #             updated_messages.append(msg)
 
-            # 更新状态
-            state = {**state, "messages": updated_messages}
+        #     # 更新状态
+        #     state = {**state, "messages": updated_messages}
 
         response = agent.invoke(state)
 
