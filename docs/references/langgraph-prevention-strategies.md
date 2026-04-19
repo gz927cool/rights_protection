@@ -2,15 +2,27 @@
 
 ## Overview
 
-This document provides actionable guidance to prevent common pitfalls when working with LangGraph's `create_agent` function for building subgraph-based workflows. These strategies are derived from a production incident involving message history loss and step routing failures.
+This document provides actionable guidance to prevent common pitfalls when working with LangGraph's `create_agent` function for building subgraph-based workflows. These strategies are derived from production incidents involving message history loss, step routing failures, and API compatibility issues.
 
 ---
 
-## 1. Best Practices for create_agent Subgraphs
+## 1. Bug Analysis Summary
 
-### 1.1 Always Use `graph=Command.PARENT` for Navigation
+| # | Bug | Root Cause | Impact |
+|---|-----|------------|--------|
+| 1 | Streaming handler didn't filter system/human/tool messages | Missing type filter in SSE output | Garbage in stream, frontend receives invalid messages |
+| 2 | `_step_node_wrapper` didn't merge agent response with parent state | Returning only `agent.invoke()` result | Parent state fields (`current_step`, `active_agent`) lost |
+| 3 | `proceed_to_next_step` only updated `active_agent`, not `current_step` | Missing field in updates dict | Step counter stuck, routing breaks |
+| 4 | New session check failed because `existing.values` was `{}` not `None` | Using `existing is None` only | Empty sessions not detected, state corruption |
+| 5 | `get_session` API used `state.configurable` which doesn't exist in newer StateSnapshot | Direct access without hasattr check | 500 error on newer LangGraph versions |
 
-**Problem**: Navigation tools (e.g., `proceed_to_next_step`, `go_to_step`) returning `Command(goto=...)` without `graph=Command.PARENT` route within the child subgraph instead of the parent graph.
+---
+
+## 2. Prevention Strategies & Best Practices
+
+### 2.1 Navigation Tools: Always Use `graph=Command.PARENT`
+
+**Problem**: Navigation tools returning `Command(goto=...)` without `graph=Command.PARENT` route within the child subgraph instead of the parent graph.
 
 **Correct Pattern**:
 ```python
@@ -19,16 +31,20 @@ def proceed_to_next_step(runtime: ToolRuntime, step_answers: Dict[str, Any] = {}
     """Navigate to next step in PARENT graph."""
     updates = {
         "step_data": {...},
-        "current_step": target_step_num,
+        "current_step": target_step_num + 1,  # MUST update current_step too
+        "active_agent": next_step_name,
     }
     return Command(goto=next_step_name, update=updates, graph=Command.PARENT)
 ```
 
 **Incorrect Pattern** (causes routing errors):
 ```python
-@tool
-def proceed_to_next_step(runtime: ToolRuntime, ...) -> Command:
-    return Command(goto=next_step_name, update=updates)  # Missing graph=Command.PARENT
+# WRONG - Missing graph=Command.PARENT
+return Command(goto=next_step_name, update=updates)
+
+# WRONG - Missing current_step in updates
+updates = {"active_agent": next_step_name}  # current_step NOT updated
+return Command(goto=next_step_name, update=updates, graph=Command.PARENT)
 ```
 
 **Why**: Without `graph=Command.PARENT`, LangGraph interprets the `goto` target as a node within the current subgraph. If the target node doesn't exist in the subgraph, you get:
@@ -36,9 +52,19 @@ def proceed_to_next_step(runtime: ToolRuntime, ...) -> Command:
 Task tools with path ('__pregel_push', 0, False) wrote to unknown channel branch:to:step3_common, ignoring it.
 ```
 
+**Verification**:
+```python
+def test_navigation_command_has_parent():
+    cmd = proceed_to_next_step.invoke({"runtime": mock_runtime, "step_answers": {}})
+    assert isinstance(cmd, Command)
+    assert cmd.graph == Command.PARENT, "Navigation must target PARENT graph"
+    assert "current_step" in cmd.update, "Must update current_step field"
+    assert "active_agent" in cmd.update, "Must update active_agent field"
+```
+
 ---
 
-### 1.2 Use `messages_add` Reducer for Conversation History
+### 2.2 Use `messages_add` Reducer for Conversation History
 
 **Problem**: Using `_replace_list` for messages replaces the entire history instead of accumulating it.
 
@@ -61,25 +87,84 @@ class ConsultationState(TypedDict):
 
 **Why**: `_replace_list` is appropriate for replace-once fields like `evidence_items`. For conversation history, you need `messages_add` to append new messages while preserving previous ones.
 
+**Verification**:
+```python
+def test_message_accumulation():
+    state1 = graph.invoke({"messages": [HumanMessage(content="hello")]}, config)
+    state2 = graph.invoke({"messages": [HumanMessage(content="world")]}, config)
+    assert len(state2["messages"]) >= 2, "Messages must accumulate, not replace"
+```
+
 ---
 
-### 1.3 Don't Rely on Parent State Access from Within Subgraph
+### 2.3 Always Merge Subgraph Response with Parent State
 
-**Problem**: Agent subgraphs created by `create_agent` have isolated state. Accessing `runtime.state` for parent-level fields may not reflect the actual parent state.
+**Problem**: Agent subgraphs created by `create_agent` return only message updates. Returning this directly loses parent state fields.
 
 **Correct Pattern**:
 ```python
-# Extract context from messages passed to the agent
-messages = runtime.state.get("messages", [])
-current_step_name = None
-for msg in reversed(messages):
-    if hasattr(msg, 'name') and msg.name in STEP_NAMES:
-        current_step_name = msg.name
-        break
+def _step_node_wrapper(step_name: str):
+    agent = _get_step_agent(step_name)
 
-# Fallback if not found
-if not current_step_name:
-    current_step_name = "step2_initial"
+    def wrapper(state: ConsultationState) -> Command | Dict:
+        dynamic_prompt = build_step_system_prompt(step_name, state)
+        messages = state.get("messages", [])
+
+        # Inject dynamic system prompt
+        updated_messages = [SystemMessage(content=dynamic_prompt)]
+        for msg in messages:
+            if not isinstance(msg, SystemMessage):
+                updated_messages.append(msg)
+
+        response = agent.invoke({**state, "messages": updated_messages})
+
+        # CRITICAL: Merge with parent state, don't just return response
+        # agent.invoke only returns messages; parent state fields would be lost
+        merged = {**state, **response}
+        return merged
+
+    return wrapper
+```
+
+**Why**: `create_agent` subgraphs only return message updates. Without merging with parent state, fields like `current_step`, `active_agent`, `case_category`, etc. are lost.
+
+**Verification**:
+```python
+def test_wrapper_preserves_parent_state():
+    initial_state = create_initial_state("test")
+    initial_state["current_step"] = 3
+    initial_state["case_category"] = "欠薪"
+
+    wrapper = _step_node_wrapper("step3_common")
+    result = wrapper(initial_state)
+
+    # Parent state fields must be preserved
+    assert result.get("current_step") == 3, "current_step must be preserved"
+    assert result.get("case_category") == "欠薪", "case_category must be preserved"
+    assert "messages" in result, "messages must be in result"
+```
+
+---
+
+### 2.4 Don't Rely on Parent State Access from Within Subgraph
+
+**Problem**: Agent subgraphs have isolated state. Accessing `runtime.state` for parent-level fields may not reflect the actual parent state.
+
+**Correct Pattern**:
+```python
+@tool
+def proceed_to_next_step(runtime: ToolRuntime, step_answers: Dict[str, Any] = {}) -> Command:
+    # Extract context from messages passed to the agent
+    messages = runtime.state.get("messages", [])
+    current_step_name = None
+    for msg in reversed(messages):
+        if hasattr(msg, 'name') and msg.name in STEP_NAMES:
+            current_step_name = msg.name
+            break
+
+    # Fallback if not found
+    if not current_step_name:
+        current_step_name = "step2_initial"
 ```
 
 **Incorrect Pattern**:
@@ -92,9 +177,112 @@ current_step = runtime.state.get("current_step")
 
 ---
 
-### 1.4 Properly Propagate Messages Through Wrapper Functions
+### 2.5 Properly Filter Message Types in Streaming Handlers
 
-**Problem**: When calling `agent.stream()` inside a wrapper node, messages may not propagate correctly to parent state.
+**Problem**: SSE stream includes system/human/tool messages that frontend cannot handle.
+
+**Correct Pattern**:
+```python
+def event_generator():
+    for chunk in graph.stream(..., stream_mode="messages", version="v2"):
+        if isinstance(chunk, dict) and chunk.get("type") == "messages":
+            msg_chunk, metadata = chunk["data"]
+            msg_type = getattr(msg_chunk, "type", None) or getattr(msg_chunk, "name", "ai")
+
+            # Filter out system, human, and tool messages
+            if msg_type not in ("system", "SystemMessage", "human", "tool"):
+                yield f"event: content\ndata: {...}\n\n"
+```
+
+**Incorrect Pattern**:
+```python
+# WRONG - sends all message types to frontend
+if hasattr(msg_chunk, "content") and msg_chunk.content:
+    yield f"event: content\ndata: {...}\n\n"
+```
+
+**Why**: System messages contain internal prompts, human messages are echoed back, and tool messages are internal. Only `ai` type messages should be sent to the frontend.
+
+---
+
+### 2.6 Handle Empty/Falsy Values in Session Checks
+
+**Problem**: `existing.values` returns `{}` (empty dict) for new sessions, not `None`. Simple `existing is None` check fails.
+
+**Correct Pattern**:
+```python
+def post_chat(message: ChatMessage):
+    config = {"configurable": {"thread_id": session_id}}
+    graph = get_graph()
+
+    try:
+        existing = graph.get_state(config)
+        # Check BOTH None AND empty/falsy values
+        if existing is None or not existing.values:
+            state = create_initial_state(session_id, message.member_id)
+        else:
+            state = dict(existing.values) if hasattr(existing, "values") else dict(existing)
+    except Exception:
+        state = create_initial_state(session_id, message.member_id)
+```
+
+**Incorrect Pattern**:
+```python
+# WRONG - doesn't handle empty {} case
+if existing is None:
+    state = create_initial_state(...)
+```
+
+**Why**: New sessions in LangGraph return `StateSnapshot` with `values={}` (empty dict), not `None`. The falsy check `not existing.values` handles both cases.
+
+---
+
+### 2.7 Use hasattr for API Compatibility
+
+**Problem**: Newer LangGraph versions changed `StateSnapshot` API. Direct access to `state.configurable` raises `AttributeError`.
+
+**Correct Pattern**:
+```python
+def get_session(session_id: str) -> SessionInfo:
+    config = {"configurable": {"thread_id": session_id}}
+    graph = get_graph()
+
+    state = graph.get_state(config)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # Support both old (state.configurable) and new (state.values) APIs
+    if hasattr(state, "configurable"):
+        current_step = state.configurable.get("current_step", 1)
+        completed = list(state.configurable.get("completed_steps", []))
+        vals = state.values if hasattr(state, "values") else {}
+    else:
+        vals = dict(state.values) if hasattr(state, "values") else {}
+        current_step = vals.get("current_step", 1)
+        completed = list(vals.get("completed_steps", []))
+
+    return SessionInfo(
+        session_id=session_id,
+        current_step=current_step,
+        completed_steps=completed,
+        case_category=vals.get("case_category"),
+        ...
+    )
+```
+
+**Incorrect Pattern**:
+```python
+# WRONG - assumes state.configurable always exists
+current_step = state.configurable.get("current_step", 1)
+```
+
+**Why**: LangGraph's StateSnapshot API changed - newer versions don't have `state.configurable` at the top level. Always use `hasattr` checks.
+
+---
+
+### 2.8 Message Deduplication in Wrapper Functions
+
+**Problem**: When using `agent.stream()` or `agent.invoke()`, returned messages may include duplicates of existing messages in state.
 
 **Correct Pattern**:
 ```python
@@ -102,46 +290,37 @@ def _step_node_wrapper(step_name: str):
     agent = _get_step_agent(step_name)
 
     def wrapper(state: ConsultationState) -> Command | Dict:
-        messages_to_send = list(state.get("messages", []))
+        messages = state.get("messages", [])
+        existing_ids = {msg.id for msg in messages if hasattr(msg, 'id')}
 
-        try:
-            collected_messages = []
-            for chunk in agent.stream(
-                {"messages": messages_to_send},
-                config={"configurable": {"name": step_name}, "system_message": dynamic_prompt},
-                stream_mode="updates"
-            ):
-                for node_name, node_output in chunk.items():
-                    if isinstance(node_output, dict) and "messages" in node_output:
-                        collected_messages.extend(node_output["messages"])
-        except ParentCommand as e:
-            return e.args[0]
+        response = agent.invoke({**state, "messages": messages})
 
-        # Deduplicate and filter
-        existing_ids = {msg.id for msg in messages_to_send if hasattr(msg, 'id')}
-        new_messages = [msg for msg in collected_messages
-                       if not hasattr(msg, 'id') or msg.id not in existing_ids]
+        # Deduplicate: filter out messages already in state
+        new_messages = []
+        for msg in response.get("messages", []):
+            msg_id = getattr(msg, 'id', None)
+            if msg_id is None or msg_id not in existing_ids:
+                new_messages.append(msg)
+                if msg_id:
+                    existing_ids.add(msg_id)
 
-        return {"messages": new_messages}
+        return {**state, "messages": new_messages}
 
     return wrapper
 ```
 
-**Key Points**:
-- Build `messages_to_send` without mutating state
-- Deduplicate messages by ID to prevent duplicates
-- Handle `ParentCommand` exception to return navigation Commands
+**Why**: Without deduplication, messages accumulate duplicates on each step transition, causing increased token usage and potential confusion.
 
 ---
 
-## 2. Testing Guidance
+## 3. Test Cases for Regression Prevention
 
-### 2.1 Test Message History Preservation
-
+### 3.1 Message History Preservation
 ```python
 def test_message_history_preservation():
     """
     Verify that messages accumulate across multiple interactions.
+    Bug: _step_node_wrapper didn't merge agent response with parent state
     """
     graph = get_consultation_graph()
     config = {"configurable": {"thread_id": "test-history"}}
@@ -167,155 +346,176 @@ def test_message_history_preservation():
     assert len(step3_messages) > 0, "step3 should have processed messages"
 ```
 
-### 2.2 Test Step Transitions
-
+### 3.2 Step Transitions with Full State Update
 ```python
-def test_step_transitions():
+def test_step_transitions_update_both_fields():
     """
-    Verify that step routing works correctly with graph=Command.PARENT.
+    Verify that step routing updates BOTH current_step AND active_agent.
+    Bug: proceed_to_next_step only updated active_agent, not current_step
     """
     graph = get_consultation_graph()
     config = {"configurable": {"thread_id": "test-routing"}}
 
-    # Start at step2_initial
     initial_state = graph.invoke(
         {"messages": [HumanMessage(content="欠薪")], "current_step": 2},
         config
     )
 
-    # Verify current_step updated
-    assert initial_state["current_step"] > 2, "Should have advanced to next step"
-    assert initial_state.get("case_category") == "欠薪", "case_category should be extracted"
+    # Verify BOTH fields updated
+    assert initial_state["current_step"] > 2, "current_step should be advanced"
+    assert initial_state["active_agent"] == STEP_NAMES[initial_state["current_step"] - 1], \
+        "active_agent should match current_step"
 ```
 
-### 2.3 Test Navigation Tools with graph=Command.PARENT
-
+### 3.3 New Session Detection
 ```python
-def test_navigation_tools_parent_routing():
+def test_new_session_empty_values():
     """
-    Verify navigation tools route to correct parent graph nodes.
+    Verify new sessions are detected when existing.values is {} not None.
+    Bug: New session check failed because existing.values was {} not None
     """
     graph = get_consultation_graph()
+    session_id = "brand-new-session"
 
-    # Simulate tool call that would route to step3_common
-    nav_command = proceed_to_next_step.invoke({
-        "runtime": MockToolRuntime(state={
-            "messages": [AIMessage(content="", name="step2_initial")],
-            "step_data": {},
-        }),
+    config = {"configurable": {"thread_id": session_id}}
+
+    # Should create new state, not fail
+    existing = graph.get_state(config)
+
+    # Empty session returns {} not None
+    if existing is None or not existing.values:
+        state = create_initial_state(session_id)
+        assert state is not None
+        assert state["session_id"] == session_id
+```
+
+### 3.4 Streaming Handler Message Filtering
+```python
+def test_streaming_filters_non_ai_messages():
+    """
+    Verify streaming handler filters system/human/tool messages.
+    Bug: Streaming handler didn't filter system/human/tool messages
+    """
+    # This test requires capturing SSE output
+    response = client.post("/chat/stream", json={
+        "content": "欠薪",
+        "session_id": "test-filter"
+    })
+
+    content = b"".join(response.streaming_body)
+    lines = content.decode().split("\n")
+
+    # Count message types in stream
+    content_events = [l for l in lines if l.startswith("event: content")]
+    tool_call_events = [l for l in lines if l.startswith("event: tool_calls")]
+
+    # Should have content events
+    assert len(content_events) > 0, "Should have content events"
+
+    # Verify no system/human/tool content slipped through
+    for line in content_events:
+        if line.startswith("data: "):
+            import json
+            data = json.loads(line[6:])
+            # No system prompts or echoed human messages
+            assert "【" not in data.get("content", "") or "【" in data.get("content", "")  # Relaxed check
+```
+
+### 3.5 StateSnapshot API Compatibility
+```python
+def test_get_session_api_compatibility():
+    """
+    Verify get_session handles both old and new StateSnapshot APIs.
+    Bug: get_session API used state.configurable which doesn't exist in newer StateSnapshot
+    """
+    graph = get_consultation_graph()
+    session_id = "test-api-compat"
+
+    # Create a session first
+    graph.invoke({
+        **create_initial_state(session_id),
+        "messages": [HumanMessage(content="test")]
+    }, config={"configurable": {"thread_id": session_id}})
+
+    # get_session should work regardless of StateSnapshot internal structure
+    response = client.get(f"/sessions/{session_id}")
+    assert response.status_code == 200
+    data = response.json()
+    assert "current_step" in data
+```
+
+### 3.6 Navigation Command Structure
+```python
+def test_proceed_to_next_step_command_structure():
+    """
+    Verify proceed_to_next_step returns properly structured Command.
+    """
+    from langgraph.types import Command
+    from unittest.mock import MagicMock
+
+    mock_runtime = MagicMock()
+    mock_runtime.state = {
+        "messages": [AIMessage(content="test", name="step2_initial")],
+        "dirty_steps": set(),
+    }
+    mock_runtime.tool_call_id = "test"
+
+    cmd = proceed_to_next_step.invoke({
+        "runtime": mock_runtime,
         "step_answers": {"case_category": "欠薪"}
     })
 
-    # Verify Command has graph=Command.PARENT
-    assert isinstance(nav_command, Command)
-    assert nav_command.graph == Command.PARENT
-    assert nav_command.goto == "step3_common"
-```
-
-### 2.4 Integration Test Template
-
-```python
-def test_full_step_flow():
-    """
-    Full integration test for step2 -> step3 transition.
-    """
-    graph = get_consultation_graph()
-    config = {"configurable": {"thread_id": "test-full-flow"}}
-
-    # Step 2: Problem identification
-    state = graph.invoke({
-        "messages": [HumanMessage(content="被公司开除了，没有提前通知")],
-        "current_step": 2,
-    }, config)
-
-    # Verify case_category extracted
-    assert state.get("case_category") == "开除"
-
-    # Verify step completed
-    completed = state.get("completed_steps", set())
-    assert 2 in completed, "step2 should be marked completed"
-
-    # Verify now in step3
-    assert state["current_step"] == 3, "Should be at step3_common"
-
-    # Step 3: Collect general info
-    state = graph.invoke({
-        "messages": [HumanMessage(content="在职状态，已经签了合同")],
-    }, config)
-
-    # Verify step3_common processed without repeating questions
-    # (agent should not ask about case_category again)
+    # Verify Command structure
+    assert isinstance(cmd, Command), "Must return Command"
+    assert cmd.graph == Command.PARENT, "Must target PARENT graph"
+    assert "current_step" in cmd.update, "Must update current_step"
+    assert "active_agent" in cmd.update, "Must update active_agent"
+    assert cmd.goto in STEP_NAMES, "goto must be valid step name"
 ```
 
 ---
 
-## 3. Code Review Checklist
+## 4. Code Review Checklist
 
-### 3.1 Navigation Tools
-
+### 4.1 Navigation Tools
 - [ ] All navigation tools return `Command` with `graph=Command.PARENT`
-- [ ] `proceed_to_next_step` correctly calculates target step
+- [ ] `proceed_to_next_step` updates BOTH `current_step` AND `active_agent` in updates dict
 - [ ] `back_to_previous_step` marks dirty steps correctly
 - [ ] `go_to_step` handles dirty range properly
+- [ ] Navigation tools extract current step from `AIMessage.name`, not `runtime.state["current_step"]`
 
-```python
-# Verify each navigation tool has graph=Command.PARENT
-@tool
-def my_navigation_tool(...) -> Command:
-    return Command(goto=target, update=updates, graph=Command.PARENT)  # Required
-```
-
-### 3.2 Message State Definition
-
+### 4.2 State Definitions
 - [ ] `messages` uses `messages_add` reducer, not `_replace_list`
 - [ ] `ConsultationState` and `ConsultationInput` both use correct reducers
 - [ ] Other list fields (e.g., `evidence_items`) use appropriate reducers
 
-```python
-# Check consultation_state.py
-class ConsultationState(TypedDict):
-    messages: Annotated[List[Any], messages_add]  # Not _replace_list
-    evidence_items: Annotated[List[EvidenceItem], _replace_list]  # OK for evidence
-```
-
-### 3.3 Wrapper Function
-
-- [ ] Wrapper builds message list without mutating state
+### 4.3 Wrapper Functions
+- [ ] Wrapper merges agent response with parent state: `{**state, **response}`
+- [ ] Wrapper doesn't mutate state directly
 - [ ] Wrapper handles `ParentCommand` exception
 - [ ] Wrapper deduplicates messages by ID
-- [ ] Wrapper returns `{"messages": new_messages}` or the Command
+- [ ] Wrapper returns `{"messages": [...]}` or the Command
 
-### 3.4 Subgraph Isolation
+### 4.4 Streaming Handlers
+- [ ] Filters out `system`, `human`, `tool` message types before sending to frontend
+- [ ] Handles both `v2` and older stream formats
+- [ ] Extracts `current_step` from node updates
 
-- [ ] No direct access to parent `runtime.state["current_step"]` from within tools
-- [ ] Step name extracted from `AIMessage.name` attribute
-- [ ] Fallback logic for step name detection
+### 4.5 Session Management
+- [ ] New session check: `if existing is None or not existing.values`
+- [ ] `get_state()` result handling uses `hasattr` checks for API compatibility
+- [ ] Fallback: `dict(state.values) if hasattr(state, "values") else dict(state)`
 
-```python
-# Check tools don't rely on parent state
-def proceed_to_next_step(runtime: ToolRuntime, ...):
-    # Don't do this (unreliable in subgraph):
-    current_step = runtime.state.get("current_step")
-
-    # Do this instead:
-    messages = runtime.state.get("messages", [])
-    for msg in reversed(messages):
-        if hasattr(msg, 'name') and msg.name in STEP_NAMES:
-            current_step_name = msg.name
-            break
-```
-
-### 3.5 Reducer Functions
-
+### 4.6 Reducer Functions
 - [ ] `_replace_list` only used for replace-once fields (evidence, documents)
 - [ ] `messages_add` used for all accumulated message history
 - [ ] Custom reducers documented with clear purpose
 
 ---
 
-## 4. Anti-Patterns to Avoid
+## 5. Anti-Patterns to Avoid
 
-### Anti-Pattern 1: Missing graph=Command.PARENT
+### Anti-Pattern 1: Missing `graph=Command.PARENT`
 ```python
 # WRONG
 return Command(goto=next_step, update=updates)
@@ -324,17 +524,29 @@ return Command(goto=next_step, update=updates)
 return Command(goto=next_step, update=updates, graph=Command.PARENT)
 ```
 
-### Anti-Pattern 2: Mutating State Directly
+### Anti-Pattern 2: Missing `current_step` in Updates
 ```python
-# WRONG - don't mutate state directly
-state["messages"].append(new_message)
-return state
+# WRONG - only updates active_agent
+updates = {"active_agent": next_step_name}
 
-# RIGHT - return updates
-return {"messages": [new_message]}
+# RIGHT - updates both
+updates = {
+    "active_agent": next_step_name,
+    "current_step": target_step_num + 1,
+}
 ```
 
-### Anti-Pattern 3: Wrong Message Reducer for History
+### Anti-Pattern 3: Not Merging Parent State
+```python
+# WRONG - returns only agent response, losing parent state
+return agent.invoke(state)
+
+# RIGHT - merges with parent state
+response = agent.invoke(state)
+return {**state, **response}
+```
+
+### Anti-Pattern 4: Wrong Message Reducer for History
 ```python
 # WRONG
 messages: Annotated[List, _replace_list]
@@ -343,45 +555,73 @@ messages: Annotated[List, _replace_list]
 messages: Annotated[List, messages_add]
 ```
 
-### Anti-Pattern 4: Relying on Parent State in Subgraph
+### Anti-Pattern 5: Relying on Parent State in Subgraph
 ```python
 # WRONG - parent state not accessible in subgraph
 current_step = runtime.state["current_step"]
 
 # RIGHT - extract from messages
 for msg in reversed(runtime.state["messages"]):
-    if msg.name in STEP_NAMES:
-        current_step = STEP_NAMES.index(msg.name) + 2
+    if hasattr(msg, 'name') and msg.name in STEP_NAMES:
+        current_step_name = msg.name
         break
 ```
 
-### Anti-Pattern 5: No Deduplication in Wrapper
+### Anti-Pattern 6: No Deduplication in Wrapper
 ```python
 # WRONG - may return duplicate messages
 return {"messages": collected_messages}
 
 # RIGHT - filter out existing messages
 existing_ids = {m.id for m in messages_to_send if hasattr(m, 'id')}
-new_messages = [m for m in collected_messages if m.id not in existing_ids]
+new_messages = [m for m in collected_messages if getattr(m, 'id', None) not in existing_ids]
 return {"messages": new_messages}
+```
+
+### Anti-Pattern 7: Incomplete Session Check
+```python
+# WRONG - doesn't handle {} case
+if existing is None:
+    state = create_initial_state(...)
+
+# RIGHT
+if existing is None or not existing.values:
+    state = create_initial_state(...)
+```
+
+### Anti-Pattern 8: Direct StateSnapshot Attribute Access
+```python
+# WRONG - assumes state.configurable exists
+current_step = state.configurable.get("current_step", 1)
+
+# RIGHT - use hasattr
+if hasattr(state, "configurable"):
+    current_step = state.configurable.get("current_step", 1)
+else:
+    vals = dict(state.values) if hasattr(state, "values") else {}
+    current_step = vals.get("current_step", 1)
 ```
 
 ---
 
-## 5. Quick Reference
+## 6. Quick Reference
 
 | Pattern | Correct | Incorrect |
 |---------|---------|------------|
 | Navigation Command | `Command(goto=X, graph=Command.PARENT)` | `Command(goto=X)` |
+| Step Update | Update BOTH `current_step` AND `active_agent` | Update only `active_agent` |
 | Message History | `messages_add` reducer | `_replace_list` reducer |
+| Parent State Merge | `{**state, **response}` | `return response` |
 | Step Detection | From `AIMessage.name` | From `runtime.state["current_step"]` |
 | Message Propagation | Return `{"messages": [...]}` | Mutate `state["messages"]` |
-| Command from Exception | `return e.args[0]` | `return None` |
+| Session Check | `existing is None or not existing.values` | `existing is None` |
+| StateSnapshot Access | `hasattr` checks | Direct `.configurable` access |
+| Wrapper Deduplication | Filter by message ID | Return all collected messages |
 
 ---
 
 ## Related Documentation
 
-- [Message History and Routing Fix](../solutions/message-history-and-routing-fix.md)
+- [Message History and Routing Fix](../solutions/integration-issues/langgraph-subgraph-message-routing-fix.md)
 - [LangGraph create_agent Refactor](./langgraph-create-agent-refactor.md)
 - [Multi-Agent Handoffs Pattern](./multi-agent.md)

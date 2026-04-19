@@ -78,6 +78,9 @@ def proceed_to_next_step(
     step_answers: Dict[str, Any] = {},
     extra_data: Optional[Any] = None,
     qualification: Optional[Dict[str, Any]] = None,
+    evidence_items: Optional[List[Dict[str, Any]]] = None,
+    risk_assessment: Optional[Dict[str, Any]] = None,
+    document_draft: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> Command:
     """
@@ -113,6 +116,26 @@ def proceed_to_next_step(
         "completed_steps": {current_step_display},  # 标记当前步骤为已完成
         "messages": [last_ai_message, transfer_message],
     }
+    if qualification is not None:
+        updates["qualification"] = qualification
+    if evidence_items is not None:
+        updates["evidence_items"] = evidence_items
+    if risk_assessment is not None:
+        updates["risk_assessment"] = risk_assessment
+    if document_draft is not None:
+        updates["document_draft"] = document_draft
+    # 保存 step_answers 到 step_data
+    if step_answers:
+        from datetime import datetime
+        step_data_update = {
+            current_step_name: {
+                "answers": step_answers,
+                "status": "completed",
+                "completed_at": datetime.now().isoformat(),
+                "extra": extra_data or {},
+            }
+        }
+        updates["step_data"] = step_data_update
     return Command(goto=next_step_name, update=updates, graph=Command.PARENT)
 
 

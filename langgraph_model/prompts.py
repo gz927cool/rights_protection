@@ -238,7 +238,7 @@ STEP_PROMPTS: Dict[str, str] = {
 ### 第二步： 向用户确认并进入下一阶段
 结束本阶段必须调用proceed_to_next_step，分以下两种情况:
 用户主动要求跳过 → proceed_to_next_step
-告知用户你判断的三级案由并向用户确认后 → proceed_to_next_step
+告知用户你判断的三级案由并向用户确认后 → proceed_to_next_step(qualification={“case_types”: [“一级案由”, “二级案由”, “三级案由”]})
 
 注意事项：
 严禁出现“请稍等”这样的回复，系统是由对话驱动的，你必须明确引导用户进行输入，或调用下一步工具。

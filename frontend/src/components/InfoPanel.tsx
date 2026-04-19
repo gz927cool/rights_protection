@@ -285,18 +285,30 @@ function Step3Form({
 // ============================================================================
 // Step 4: Case Type Display
 // ============================================================================
-function Step4Info({ caseCategory }: { caseCategory?: string }) {
+function Step4Info({
+  caseCategory,
+  qualification,
+}: {
+  caseCategory?: string
+  qualification?: InfoPanelProps["qualification"]
+}) {
+  const caseTypes = qualification?.case_types
+
   return (
     <div className="space-y-3">
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
         <p className="text-xs text-blue-600 mb-1 font-medium">当前案由</p>
-        <p className="font-semibold text-gray-800">{caseCategory || "待确定"}</p>
+        <p className="font-semibold text-gray-800">
+          {caseTypes ? caseTypes.join(" > ") : caseCategory || "待确定"}
+        </p>
       </div>
 
       <div className="bg-gray-50 rounded-xl p-3">
         <p className="text-xs text-gray-500 mb-2 font-medium">特殊问题说明</p>
         <p className="text-xs text-gray-600">
-          AI正在根据您的案件类型，追问确定三级案由。请在聊天中回复相关问题。
+          {caseTypes
+            ? "三级案由已确认，请在右侧确认信息无误后继续。"
+            : "AI正在根据您的案件类型，追问确定三级案由。请在聊天中回复相关问题。"}
         </p>
       </div>
 
@@ -305,15 +317,19 @@ function Step4Info({ caseCategory }: { caseCategory?: string }) {
         <div className="space-y-1.5 text-xs">
           <div className="flex items-start gap-2">
             <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-xs">一级</span>
-            <span className="text-gray-600">{caseCategory || "待确定"}</span>
+            <span className="text-gray-600">{caseTypes?.[0] || caseCategory || "待确定"}</span>
           </div>
           <div className="flex items-start gap-2">
             <span className="bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded text-xs">二级</span>
-            <span className="text-gray-400 italic">AI追问后确定</span>
+            <span className={caseTypes?.[1] ? "text-gray-600" : "text-gray-400 italic"}>
+              {caseTypes?.[1] || "AI追问后确定"}
+            </span>
           </div>
           <div className="flex items-start gap-2">
             <span className="bg-green-100 text-green-700 px-1.5 py-0.5 rounded text-xs">三级</span>
-            <span className="text-gray-400 italic">AI追问后确定</span>
+            <span className={caseTypes?.[2] ? "text-gray-600" : "text-gray-400 italic"}>
+              {caseTypes?.[2] || "AI追问后确定"}
+            </span>
           </div>
         </div>
       </div>
@@ -826,7 +842,7 @@ export default function InfoPanel({
       <div className="flex-1 overflow-y-auto p-4">
         {currentStep === 2 && <Step2Info caseCategory={caseCategory} />}
         {currentStep === 3 && <Step3Form onSend={onSendMessage} />}
-        {currentStep === 4 && <Step4Info caseCategory={caseCategory} />}
+        {currentStep === 4 && <Step4Info caseCategory={caseCategory} qualification={qualification} />}
         {currentStep === 5 && <Step5Info qualification={qualification} caseCategory={caseCategory} />}
         {currentStep === 6 && (
           <Step6Evidence
