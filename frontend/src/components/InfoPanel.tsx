@@ -812,15 +812,15 @@ export default function InfoPanel({
   onSendFile,
 }: InfoPanelProps) {
   const stepTitles: Record<number, string> = {
-    2: "问题初判",
-    3: "通用问题",
-    4: "特殊问题",
-    5: "案件定性",
-    6: "证据攻略",
-    7: "风险提示",
-    8: "文书生成",
-    9: "行动路线图",
-    10: "求助复核",
+    1: "问题初判",
+    2: "通用问题",
+    3: "特殊问题",
+    4: "案件定性",
+    5: "证据攻略",
+    6: "风险提示",
+    7: "文书生成",
+    8: "行动路线图",
+    9: "求助复核",
   }
 
   return (
@@ -840,23 +840,23 @@ export default function InfoPanel({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
-        {currentStep === 2 && <Step2Info caseCategory={caseCategory} />}
-        {currentStep === 3 && <Step3Form onSend={onSendMessage} />}
-        {currentStep === 4 && <Step4Info caseCategory={caseCategory} qualification={qualification} />}
-        {currentStep === 5 && <Step5Info qualification={qualification} caseCategory={caseCategory} />}
-        {currentStep === 6 && (
+        {currentStep === 1 && <Step2Info caseCategory={caseCategory} />}
+        {currentStep === 2 && <Step3Form onSend={onSendMessage} />}
+        {currentStep === 3 && <Step4Info caseCategory={caseCategory} qualification={qualification} />}
+        {currentStep === 4 && <Step5Info qualification={qualification} caseCategory={caseCategory} />}
+        {currentStep === 5 && (
           <Step6Evidence
             evidenceItems={evidenceItems}
             onSendMessage={onSendMessage}
             onSendFile={onSendFile}
           />
         )}
-        {currentStep === 7 && <Step7Risk riskAssessment={riskAssessment} />}
-        {currentStep === 8 && <Step8Documents documentDraft={documentDraft} />}
-        {currentStep === 9 && <Step9Roadmap caseCategory={caseCategory} />}
-        {currentStep === 10 && <Step10Review onSend={onSendMessage} />}
+        {currentStep === 6 && <Step7Risk riskAssessment={riskAssessment} />}
+        {currentStep === 7 && <Step8Documents documentDraft={documentDraft} />}
+        {currentStep === 8 && <Step9Roadmap caseCategory={caseCategory} />}
+        {currentStep === 9 && <Step10Review onSend={onSendMessage} />}
 
-        {currentStep < 2 && (
+        {currentStep < 1 && (
           <div className="space-y-4">
             <div className="bg-gradient-to-br from-blue-50 to-emerald-50 border border-blue-200 rounded-xl p-4">
               <div className="flex items-center gap-2 mb-3">
