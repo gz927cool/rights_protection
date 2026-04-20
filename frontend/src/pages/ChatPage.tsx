@@ -628,6 +628,15 @@ function LoadingDots() {
 // Main Chat Page
 // =============================================================================
 
+// Generate UUID v4 (compatible with all browsers)
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0
+    const v = c === 'x' ? r : (r & 0x3 | 0x8)
+    return v.toString(16)
+  })
+}
+
 export default function ChatPage() {
   const { sessionId } = useParams()
   const [messages, setMessages] = useState<Message[]>([])
@@ -639,7 +648,9 @@ export default function ChatPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
-  const [activeSessionId, setActiveSessionId] = useState(sessionId || "new")
+  const [activeSessionId, setActiveSessionId] = useState(
+    sessionId || generateUUID()
+  )
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -651,7 +662,7 @@ export default function ChatPage() {
 
   // Fetch session state
   useEffect(() => {
-    if (!activeSessionId || activeSessionId === "new") return
+    if (!activeSessionId) return
 
     fetch(`/sessions/${activeSessionId}`)
       .then((r) => r.json())
@@ -840,7 +851,7 @@ export default function ChatPage() {
       }
 
       // Update session state
-      if (activeSessionId !== "new") {
+      if (activeSessionId) {
         fetch(`/sessions/${activeSessionId}`)
           .then((r) => r.json())
           .then(setSessionState)

@@ -92,56 +92,72 @@ STEP_PROMPTS: Dict[str, str] = {
 
     "step3_common": """## 本步任务：收集用户基本信息。
 
-你需要通过对话收集用户的基本信息。可使用追问工具询问缺失项，但每次1到3个关键问题。
+**目标：在3轮追问内收集全部9项信息。严禁跳过信息收集直接进入下一步。**
 
-## 必收集的信息（共9项）
+## 9项必收集字段
 
-| # | 字段名 | 说明 |
-|---|--------|------|
-| 1 | employment_status | 就业状态：在职/离职/待岗 |
-| 2 | contract_status | 劳动合同签订情况 |
-| 3 | monthly_salary | 月工资 |
-| 4 | salary_payment_method | 工资发放方式 |
-| 5 | social_security | 社保缴纳情况 |
-| 6 | job_position | 工作岗位 |
-| 7 | entry_date | 入职时间 |
-| 8 | amount_involved | 涉及金额 |
-| 9 | expected_result | 期望结果 |
+| # | 字段名 | 值示例 |
+|---|--------|--------|
+| 1 | employment_status | "在职" / "离职" / "待岗" |
+| 2 | contract_status | "已签订" / "未签订" / "不清楚" |
+| 3 | monthly_salary | "6000"（元，仅数字） |
+| 4 | salary_payment_method | "银行转账" / "现金" / "微信/支付宝" |
+| 5 | social_security | "已缴纳" / "未缴纳" / "部分缴纳" |
+| 6 | job_position | "流水线操作工" 等 |
+| 7 | entry_date | "2023-03-15"（YYYY-MM-DD） |
+| 8 | amount_involved | "12000"（元，仅数字） |
+| 9 | expected_result | "要回被拖欠的工资" 等 |
 
-## 信息缺口检测（每次回复前必须执行）
+## 追问执行规则
 
-从用户输入和上下文提取已收集的字段，与上表对比：
+### 规则1：提取已知信息
+仔细阅读用户输入和历史对话，将任何与9个字段相关的描述**直接提取并填入对应字段**：
 
-**如果存在缺失字段** → 进行追问
-**如果9项全部收集完毕** → 调用 proceed_to_next_step
-**如果用户明确要求结束当前步骤或用户说"够了"/"跳过"/"进入下一步"** → 调用 proceed_to_next_step
+- 读到"月工资6000" → monthly_salary = "6000"
+- 读到"银行转账" → salary_payment_method = "银行转账"
+- 读到"没签合同/未签" → contract_status = "未签订"
+- 读到"没交社保/未缴社保" → social_security = "未缴纳"
+- 读到"操作工/经理/技术员" → job_position
+- 读到"2023年3月入职" → entry_date = "2023-03-01"
+- 读到"欠12000/两个月工资一万二" → amount_involved = "12000"
+- 读到"已离职/主动辞职" → employment_status = "离职"
+- 读到"要回工资/要赔偿" → expected_result
 
+### 规则2：追问必须针对缺失字段
+每轮只追问缺失字段，每组3-4个关联问题。
 
-**注意事项**：
-- 不要重复询问已确认的字段
-- 完成询问后进入下一阶段必须调用proceed_to_next_step
+**示例追问格式**：
+"根据您说的，我已经了解到：[列出已提取的字段]。还需要确认几个关键项：1）您的就业状态是？2）您是什么时候入职的？3）这次争议涉及的金额大概多少？"
 
-## proceed_to_next_step 调用规则
-调用时 step_answers 必须包含：
-- 所有要收集的字段（未收集的字段 value 置为 null）
-**step_answers示例**：
+### 规则3：禁止过早跳转
+**严禁在缺失字段数量≥3时调用 proceed_to_next_step**。
+- 缺失字段≥3 → 继续追问（每组3-4个）
+- 缺失字段≤2 → 补充最后2项后调用 proceed_to_next_step
+- 用户说"够了/进入下一步" → 调用 proceed_to_next_step
+
+### 规则4：3轮强制结束
+- 第3轮结束后，无论是否还有缺失字段，必须调用 proceed_to_next_step（未填字段置为null）
+
+## proceed_to_next_step 调用格式
 ```json
 {
-  "employment_status": "离职",
-  "contract_status": "已签订",
-  "monthly_salary": "8000",
-  "salary_payment_method": "银行转账",
-  "social_security": "已缴纳",
-  "job_position": "外卖骑手",
-  "entry_date": "2023-01-15",
-  "weekly_hours": "40",
-  "claims": "欠薪,经济补偿金",
-  "amount_involved": "24000",
-  "expected_result": "拿回工资和赔偿金",
-  "case_category": "欠薪"
+  "step_answers": {
+    "employment_status": "离职",
+    "contract_status": "未签订",
+    "monthly_salary": "6000",
+    "salary_payment_method": "银行转账",
+    "social_security": "未缴纳",
+    "job_position": "流水线操作工",
+    "entry_date": "2023-03-15",
+    "amount_involved": "12000",
+    "expected_result": "要回被拖欠的工资"
+  }
 }
 ```
-""",
+
+**注意**：禁止询问与9项字段无关的问题。禁止在缺失≥3项时调用 proceed_to_next_step。
+"""
+,
 
     "step4_special": """# **本阶段任务**：精准确定三级案由
 
