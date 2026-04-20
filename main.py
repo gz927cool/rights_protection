@@ -233,7 +233,7 @@ def post_chat_stream(message: ChatMessage):
     # communicates via stdlib queue.Queue so StreamingResponse can iterate.
     def event_generator():
         q: queue.Queue = queue.Queue()
-        CHUNK_TIMEOUT = 30  # seconds per chunk
+        CHUNK_TIMEOUT = 120  # seconds per chunk (LLM needs more time)
 
         def sync_worker():
             try:
@@ -265,7 +265,7 @@ def post_chat_stream(message: ChatMessage):
                     chunk = q.get(timeout=CHUNK_TIMEOUT)
                 except queue.Empty:
                     executor.shutdown(wait=False)
-                    yield f"data: {_json.dumps({'error': 'AI响应超时（30秒），可能是模型服务暂时不可用，请稍后重试'})}\n\n"
+                    yield f"data: {_json.dumps({'error': 'AI响应超时（120秒），可能是模型服务暂时不可用，请稍后重试'})}\n\n"
                     break
 
                 if chunk is None:
