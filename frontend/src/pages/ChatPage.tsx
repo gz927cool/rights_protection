@@ -696,11 +696,15 @@ export default function ChatPage() {
     setStreamingContent("")
 
     try {
-      const res = await fetch("/chat/stream", {
+      const res = await fetch("/v1/chat/completions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content: userInput, session_id: activeSessionId }),
-        signal: AbortSignal.timeout(60000),
+        body: JSON.stringify({
+          messages: [{ role: "user", content: userInput }],
+          stream: true,
+          sessionId: activeSessionId
+        }),
+        signal: AbortSignal.timeout(120000),
       })
 
       if (!res.ok) {
@@ -736,78 +740,34 @@ export default function ChatPage() {
 
           const chunk = decoder.decode(value, { stream: true })
 
-          // Track current OpenAI SSE event type
-          let currentEvent: StreamEvent["event"] | null = null
-
           for (const line of chunk.split("\n")) {
-            if (line.startsWith("event: ")) {
-              currentEvent = line.slice(7).trim() as StreamEvent["event"]
-              continue
-            }
             if (!line.startsWith("data: ")) continue
+            const dataStr = line.slice(6).trim()
+            if (dataStr === "[DONE]") {
+              streamDone = true
+              return
+            }
 
             try {
-              const data = JSON.parse(line.slice(6)) as StreamEvent
+              const data = JSON.parse(dataStr)
 
-              if (data.error) {
-                setError(data.error)
-                fullContent += `\n\n[系统提示] ${data.error}`
+              // OpenAI chunk format: choices[0].delta.content
+              const content = data.choices?.[0]?.delta?.content
+              const finishReason = data.choices?.[0]?.finish_reason
+
+              if (content) {
+                fullContent += content
                 setStreamingContent(fullContent)
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === streamingMessageId
-                      ? { ...msg, content: fullContent, streaming: false }
+                      ? { ...msg, content: fullContent }
                       : msg
                   )
                 )
-                currentEvent = null
               }
 
-              // Handle by event type (OpenAI SSE format)
-              if (currentEvent === "tool_calls") {
-                // Tool call request — render interactive component
-                const toolName = data.name || ""
-                const args = data.arguments || {}
-                if (toolName === "select_option" || toolName === "text_input" || toolName === "date_picker" || toolName === "number_input") {
-                  // Append component marker to the current message content
-                  const componentMarker = `[TOOL_CALL:${toolName}]${JSON.stringify(args)}[/TOOL_CALL]`
-                  fullContent += componentMarker
-                  setStreamingContent(fullContent)
-                  setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === streamingMessageId
-                        ? { ...msg, content: fullContent }
-                        : msg
-                    )
-                  )
-                }
-                currentEvent = null
-              } else if (currentEvent === "content" || !currentEvent) {
-                // Content event or legacy format (no event prefix = content for backwards compat)
-                if (data.content) {
-                  fullContent += data.content
-                  setStreamingContent(fullContent)
-                  setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === streamingMessageId
-                        ? { ...msg, content: fullContent }
-                        : msg
-                    )
-                  )
-                }
-                if (data.artifact_type) {
-                  setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === streamingMessageId
-                        ? { ...msg, artifactType: data.artifact_type as Message["artifactType"], artifactData: data.artifact_data }
-                        : msg
-                    )
-                  )
-                }
-                currentEvent = null
-              } else if (currentEvent === "tool_call_done") {
-                currentEvent = null
-              } else if (currentEvent === "done") {
+              if (finishReason === "stop") {
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === streamingMessageId
@@ -815,28 +775,9 @@ export default function ChatPage() {
                       : msg
                   )
                 )
-                // 更新会话ID
-                const newSessionId = data.session_id && data.session_id !== activeSessionId
-                  ? data.session_id
-                  : activeSessionId
-                if (data.session_id && data.session_id !== activeSessionId) {
-                  setActiveSessionId(data.session_id)
-                  window.history.replaceState(null, "", `/chat/${data.session_id}`)
-                }
-                // 从后端获取完整会话状态
-                fetch(`/sessions/${newSessionId}`)
-                  .then((r) => r.json())
-                  .then((sessionData) => {
-                    if (sessionData && sessionData.current_step) {
-                      setSessionState(sessionData)
-                    }
-                  })
-                  .catch(console.error)
-                currentEvent = null
               }
             } catch (parseErr) {
               console.error("解析流数据失败:", parseErr)
-              currentEvent = null
             }
           }
 

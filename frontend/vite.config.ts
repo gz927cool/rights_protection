@@ -7,7 +7,7 @@ export default defineConfig({
     host: "0.0.0.0",
     port: 5173,
     proxy: {
-      "/chat/stream": {
+      "/v1/chat/completions": {
         target: "http://localhost:8000",
         changeOrigin: true,
         rewrite: (path) => path,
