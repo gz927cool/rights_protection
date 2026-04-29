@@ -3,12 +3,13 @@ FastAPI 聊天接口 - 九步劳动争议咨询系统
 
 提供类 ChatGPT 的流式聊天体验。
 """
+import time
 import uuid
 import os
-import base64
+import json
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, AsyncIterator, List, Dict
+from typing import Optional, AsyncIterator, List, Dict, Literal, Any
 from contextlib import asynccontextmanager
 import anyio
 
@@ -87,6 +88,49 @@ class SessionInfo(BaseModel):
     qualification: Optional[Dict] = None
     document_draft: Optional[Dict] = None
     risk_assessment: Optional[Dict] = None
+
+
+# ============================================================================
+# OpenAI Compatible Models
+# ============================================================================
+
+class ChatCompletionMessage(BaseModel):
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str
+    name: Optional[str] = None
+
+
+class ChatCompletionRequest(BaseModel):
+    messages: List[ChatCompletionMessage]
+    model: Optional[str] = None
+    sessionId: Optional[str] = None
+    stream: bool = False
+    temperature: Optional[float] = 0.7
+    frequency_penalty: Optional[float] = 0.0
+    presence_penalty: Optional[float] = 0.0
+    top_p: Optional[float] = 1.0
+    max_tokens: Optional[int] = None
+
+
+def _openai_chunk(
+    *,
+    completion_id: str,
+    created: int,
+    model: str,
+    delta: Dict[str, Any],
+    finish_reason: Optional[str] = None
+) -> Dict[str, Any]:
+    return {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": delta,
+            "finish_reason": finish_reason
+        }]
+    }
 
 
 @app.get("/")
@@ -195,59 +239,60 @@ def post_chat(message: ChatMessage):
 
 
 @app.post("/chat/stream")
-def post_chat_stream(message: ChatMessage):
+async def chat_stream(request: ChatCompletionRequest):
     """
-    流式聊天接口 - Server-Sent Events
+    OpenAI 兼容流式聊天接口 - /v1/chat/completions 风格
 
-    使用说明：
-    - POST 请求，body: {"content": "用户消息", "session_id": "可选"}
-    - 返回 SSE 流式响应
-    - 每个事件: data: {"content": "...", "done": false}\n\n
-    - 结束事件: data: {"done": true, "current_step": N}\n\n
+    完全兼容 OpenAI Chat Completions 流式 API 格式。
     """
-    import json as _json
     import queue
+    from langchain_core.messages import HumanMessage
 
-    session_id = message.session_id or str(uuid.uuid4())
+    graph = get_graph()
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    model_name = request.model or "default"
 
+    # 构建输入消息 - 从 messages 列表提取最后一条 user 消息作为内容
+    user_content = ""
+    for msg in reversed(request.messages):
+        if msg.role == "user":
+            user_content = msg.content
+            break
+
+    session_id = request.sessionId or str(uuid.uuid4())
     config = {
         "configurable": {"thread_id": session_id},
         "recursion_limit": 100,
     }
 
-    graph = get_graph()
-
     # 初始化或获取状态
     try:
         existing = graph.get_state(config)
         if existing is None or not existing.values:
-            state = create_initial_state(session_id, message.member_id)
+            state = create_initial_state(session_id, None)
         else:
             state = dict(existing.values) if hasattr(existing, "values") else dict(existing)
     except Exception:
-        state = create_initial_state(session_id, message.member_id)
+        state = create_initial_state(session_id, None)
 
-    from langchain_core.messages import HumanMessage
-
-    # Sync generator: blocking graph.stream() runs in ThreadPoolExecutor,
-    # communicates via stdlib queue.Queue so StreamingResponse can iterate.
-    def event_generator():
+    async def event_generator():
         q: queue.Queue = queue.Queue()
-        CHUNK_TIMEOUT = 120  # seconds per chunk (LLM needs more time)
+        CHUNK_TIMEOUT = 120
 
         def sync_worker():
             try:
                 for chunk in graph.stream(
                     {
                         **state,
-                        "messages": [HumanMessage(content=message.content)],
+                        "messages": [HumanMessage(content=user_content)],
                     },
                     stream_mode="messages",
                     version="v2",
                     config=config,
                 ):
                     q.put(chunk)
-                q.put(None)  # Sentinel: stream ended
+                q.put(None)
             except Exception as e:
                 q.put({"__error": str(e)})
                 q.put(None)
@@ -256,88 +301,48 @@ def post_chat_stream(message: ChatMessage):
         executor.submit(sync_worker)
 
         try:
-            current_step = 1
-            last_message_count = 0
-            prev_step_name = None
+            # 发送首个 chunk (role=assistant)
+            yield f"data: {json.dumps(_openai_chunk(completion_id=completion_id, created=created, model=model_name, delta={'role': 'assistant'}), ensure_ascii=False)}\n\n"
+
+            assembled_text = ""
 
             while True:
                 try:
                     chunk = q.get(timeout=CHUNK_TIMEOUT)
                 except queue.Empty:
                     executor.shutdown(wait=False)
-                    yield f"data: {_json.dumps({'error': 'AI响应超时（120秒），可能是模型服务暂时不可用，请稍后重试'})}\n\n"
+                    error_chunk = _openai_chunk(completion_id=completion_id, created=created, model=model_name, delta={"content": "AI响应超时（120秒），可能是模型服务暂时不可用，请稍后重试"}, finish_reason="stop")
+                    yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
                     break
 
                 if chunk is None:
-                    break  # Stream ended normally
-
-                if isinstance(chunk, dict) and "__error" in chunk:
-                    yield f"data: {_json.dumps({'error': chunk['__error']})}\n\n"
                     break
 
-                # v2 format: {"type": "messages", "ns": (), "data": (message_chunk, metadata)}
+                if isinstance(chunk, dict) and "__error" in chunk:
+                    error_chunk = _openai_chunk(completion_id=completion_id, created=created, model=model_name, delta={"content": chunk['__error']}, finish_reason="stop")
+                    yield f"data: {json.dumps(error_chunk, ensure_ascii=False)}\n\n"
+                    break
+
                 if isinstance(chunk, dict) and chunk.get("type") == "messages":
                     msg_chunk, metadata = chunk["data"]
-
-                    # Filter by node if metadata available
                     node_name = metadata.get("langgraph_node", "") if metadata else ""
 
-                    # Handle tool_calls in message chunk
-                    if hasattr(msg_chunk, "tool_calls") and msg_chunk.tool_calls:
-                        for tc in msg_chunk.tool_calls:
-                            tc_payload = _json.dumps({
-                                "name": tc.get("name", ""),
-                                "arguments": tc.get("args", {}),
-                            })
-                            yield f"event: tool_calls\ndata: {tc_payload}\n\n"
-
-                    # Handle content - skip system, human, and tool messages
                     if hasattr(msg_chunk, "content") and msg_chunk.content:
                         msg_type = getattr(msg_chunk, "type", None) or getattr(msg_chunk, "name", "ai")
                         if msg_type not in ("system", "SystemMessage", "human", "tool"):
-                            content_payload = _json.dumps({
-                                "content": msg_chunk.content,
-                                "role": "assistant",
-                            })
-                            yield f"event: content\ndata: {content_payload}\n\n"
+                            content = msg_chunk.content
+                            delta_text = content[len(assembled_text):] if content.startswith(assembled_text) else content
+                            if delta_text:
+                                assembled_text += delta_text
+                                delta_chunk = _openai_chunk(completion_id=completion_id, created=created, model=model_name, delta={"content": delta_text})
+                                yield f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n"
 
                     prev_step_name = node_name
-                elif isinstance(chunk, dict) and chunk.get("type") == "updates":
-                    # Node state updates - extract current_step
-                    for node_name, node_data in chunk.get("data", {}).items():
-                        if isinstance(node_data, dict) and "current_step" in node_data:
-                            current_step = node_data["current_step"]
-                else:
-                    # Fallback: try older dict format
-                    for step_name, step_result in chunk.items():
-                        if isinstance(step_result, dict):
-                            messages = step_result.get("messages", [])
-                            if len(messages) > last_message_count:
-                                new_messages = messages[last_message_count:]
-                                for msg in new_messages:
-                                    if hasattr(msg, "type") and msg.type == "ai" and hasattr(msg, "content"):
-                                        if hasattr(msg, "tool_calls") and msg.tool_calls:
-                                            for tc in msg.tool_calls:
-                                                tc_payload = _json.dumps({
-                                                    "name": tc.get("name", ""),
-                                                    "arguments": tc.get("args", {}),
-                                                })
-                                                yield f"event: tool_calls\ndata: {tc_payload}\n\n"
-                                        if msg.content:
-                                            content_payload = _json.dumps({
-                                                "content": msg.content,
-                                                "role": "assistant",
-                                            })
-                                            yield f"event: content\ndata: {content_payload}\n\n"
-                                last_message_count = len(messages)
-                            if "current_step" in step_result:
-                                current_step = step_result["current_step"]
-                        prev_step_name = step_name
-                    continue
 
-            # 结束事件
-            step_name = STEP_DISPLAY_NAMES.get(STEP_NAMES[current_step - 1], STEP_NAMES[current_step - 1])
-            yield f"event: done\ndata: {_json.dumps({'current_step': current_step, 'current_step_name': step_name, 'session_id': session_id})}\n\n"
+            # 发送结束 chunk
+            final_chunk = _openai_chunk(completion_id=completion_id, created=created, model=model_name, delta={}, finish_reason="stop")
+            yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
         finally:
             executor.shutdown(wait=False)
 
